@@ -139,14 +139,18 @@ if /I "%VC_ARCH%" NEQ "%PROCESSOR_ARCHITECTURE%" (
 rem Find Visual Studio and run vcvarsall.bat
 call "%SOURCE_ROOT%\scripts\find-vswhere.bat"
 if !ERRORLEVEL! NEQ 0 goto Error
-for /f "usebackq delims=" %%i in (`%VSWHERE% -latest -property installationPath`) do (
+rem ARBS-W: -products * so that VS Build Tools (no IDE) installs are found too
+for /f "usebackq delims=" %%i in (`%VSWHERE% -latest -products * -property installationPath`) do (
     call "%%i\VC\Auxiliary\Build\vcvarsall.bat" %VC_ARCH%
 )
 if !ERRORLEVEL! NEQ 0 goto Error
 
 rem Find VC redistributable DLLs
-for /f "usebackq delims=" %%i in (`%VSWHERE% -latest -find VC\Redist\MSVC\*\%ARCH%\Microsoft.VC*.CRT`) do set VC_REDIST_DLL_PATH=%%i
+for /f "usebackq delims=" %%i in (`%VSWHERE% -latest -products * -find VC\Redist\MSVC\*\%ARCH%\Microsoft.VC*.CRT`) do set VC_REDIST_DLL_PATH=%%i
 if !ERRORLEVEL! NEQ 0 goto Error
+rem ARBS-W: allow pinning the VC runtime folder explicitly (do not rely on vswhere output order)
+if defined ARBS_VC_REDIST_DLL_PATH set VC_REDIST_DLL_PATH=%ARBS_VC_REDIST_DLL_PATH%
+echo VC_REDIST_DLL_PATH=!VC_REDIST_DLL_PATH!
 
 echo Cleaning output directories
 rmdir /s /q %DEPLOY_FOLDER%
@@ -292,9 +296,15 @@ if "%ML_SYMBOL_STORE%" NEQ "" (
     if !ERRORLEVEL! NEQ 0 goto Error
 )
 
+rem ARBS-W: ARBS_SKIP_MSI=1 skips the WiX/NuGet MSI step (portable zip only)
+if "%ARBS_SKIP_MSI%"=="1" (
+    echo Skipping MSI ^(ARBS_SKIP_MSI=1^)
+    goto ArbsAfterMsi
+)
 echo Building MSI
 cmd /c "set VERSION= && msbuild -Restore %SOURCE_ROOT%\wix\Moonlight\Moonlight.wixproj /p:Configuration=%BUILD_CONFIG% /p:Platform=%ARCH% /p:MSBuildProjectExtensionsPath=%BUILD_FOLDER%\"
 if !ERRORLEVEL! NEQ 0 goto Error
+:ArbsAfterMsi
 
 echo Copying application binary to deployment directory
 copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe %DEPLOY_FOLDER%
