@@ -237,6 +237,14 @@ echo Copying DLL dependencies
 copy %SOURCE_ROOT%\libs\windows\lib\%ARCH%\*.dll %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
 
+rem ARBS-W: Discord integration is not linked (app.pro), so do not ship its DLL either
+if "%ARBS_NO_DISCORD%"=="1" (
+    if exist %DEPLOY_FOLDER%\discord-rpc.dll (
+        echo Removing discord-rpc.dll ^(ARBS_NO_DISCORD=1^)
+        del /q %DEPLOY_FOLDER%\discord-rpc.dll
+    )
+)
+
 echo Copying AntiHooking.dll
 copy %BUILD_FOLDER%\AntiHooking\%BUILD_CONFIG%\AntiHooking.dll %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error

@@ -223,6 +223,10 @@ private:
     static
     void clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t *left, uint8_t *right);
 
+    // ARBS-W: PCM controller haptics (Nonary common-c ConnListenerControllerHaptics, 14th callback)
+    static
+    void clControllerHaptics(uint16_t controllerNumber, uint32_t sequence, const uint8_t* pcm, uint16_t frames);
+
     static
     int arInit(int audioConfiguration,
                const POPUS_MULTISTREAM_CONFIGURATION opusConfig,

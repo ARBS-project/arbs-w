@@ -55,6 +55,10 @@
 #include "settings/streamingpreferences.h"
 #include "gui/sdlgamepadkeynavigation.h"
 
+#ifdef ARBS_W
+#include "arbs/arbs_bridge.h"
+#endif
+
 #if defined(Q_OS_WIN32)
 #define IS_UNSPECIFIED_HANDLE(x) ((x) == INVALID_HANDLE_VALUE || (x) == NULL)
 
@@ -284,6 +288,11 @@ LONG WINAPI UnhandledExceptionHandler(struct _EXCEPTION_POINTERS *ExceptionInfo)
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
+#ifdef ARBS_W
+    // ARBS-W: session summary line with the crash flag (try-locks only, never blocks)
+    ArbsBridge::onCrash();
+#endif
+
     WCHAR dmpFileName[MAX_PATH];
     swprintf_s(dmpFileName, L"%ls\\Moonlight-%I64u.dmp",
                (PWCHAR)QDir::toNativeSeparators(Path::getLogDir()).utf16(), QDateTime::currentSecsSinceEpoch());
@@ -424,6 +433,12 @@ void configureSignalHandlers()
 
 int main(int argc, char *argv[])
 {
+#ifdef ARBS_W
+    // ARBS-W: keep every SDL HIDAPI driver (SDL3 Flydigi driver included) away from the APEX dongle IF2 before SDL
+    // reads any hint or opens any device (B2_DESIGN.md 4-4). Process-local only.
+    ArbsBridge::applySdlHintsEarly();
+#endif
+
     SDL_SetMainReady();
 
     // Set the app version for the QCommandLineParser's showVersion() command
@@ -435,6 +450,12 @@ int main(int argc, char *argv[])
     QCoreApplication::setOrganizationName("Moonlight Game Streaming Project");
     QCoreApplication::setOrganizationDomain("moonlight-stream.com");
     QCoreApplication::setApplicationName("Moonlight");
+
+#ifdef ARBS_W
+    // ARBS-W: portable.dat next to the exe -> work in the exe folder even when started from a shortcut, so that
+    // settings/cache/logs never go to HKCU or %LOCALAPPDATA% (B2_DESIGN.md 4-7)
+    ArbsBridge::fixPortableWorkingDir();
+#endif
 
     if (QFile(QDir::currentPath() + "/portable.dat").exists()) {
         QSettings::setDefaultFormat(QSettings::IniFormat);
@@ -681,6 +702,11 @@ int main(int argc, char *argv[])
     // the user triggers a UAC prompt. This option controls the software/SDL renderer.
     // The DXVA2 renderer uses Direct3D 9Ex itself directly.
     SDL_SetHint(SDL_HINT_WINDOWS_USE_D3D9EX, "1");
+
+#ifdef ARBS_W
+    // ARBS-W: ARBS-<epoch>.log in the log folder (portable = exe folder) + APEX engine, before the first SDL init
+    ArbsBridge::initEarly(Path::getLogDir());
+#endif
 
     if (SDL_InitSubSystem(SDL_INIT_TIMER) != 0) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -1056,6 +1082,11 @@ int main(int argc, char *argv[])
     }
 
     int err = app.exec();
+
+#ifdef ARBS_W
+    // ARBS-W: if a stream is still attached, send the APEX stop sequence and close IF2
+    ArbsBridge::shutdown("앱 종료");
+#endif
 
     // Give worker tasks time to properly exit. Fixes PendingQuitTask
     // sometimes freezing and blocking process exit.

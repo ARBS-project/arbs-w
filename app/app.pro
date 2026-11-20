@@ -152,8 +152,10 @@ win32 {
     LIBS += -llibssl -llibcrypto -lSDL2 -lSDL2_ttf -lavcodec -lavutil -lswscale -lopus -ldxgi -ld3d11 -llibplacebo
     CONFIG += ffmpeg libplacebo
 }
-win32:!winrt {
-    CONFIG += discord-rpc
+# ARBS-W (B2 D9): Discord Rich Presence is excluded from the Windows build (no discord-rpc link, no DLL in the package).
+# Upstream: win32:!winrt { CONFIG += discord-rpc }
+win32 {
+    include(arbs/arbs.pri)
 }
 macx {
     !disable-prebuilts {

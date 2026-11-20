@@ -135,6 +135,25 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_SpecialKeyCombos[KeyComboToggleKeyboardGrab].scanCode = SDL_SCANCODE_K;
     m_SpecialKeyCombos[KeyComboToggleKeyboardGrab].enabled = WMUtils::isRunningDesktopEnvironment();
 
+    // ARBS-W: H and J are not used by the stock combos (Q Z X S M C D V L E K)
+    m_SpecialKeyCombos[KeyComboArbsToggleApex].keyCombo = KeyComboArbsToggleApex;
+    m_SpecialKeyCombos[KeyComboArbsToggleApex].keyCode = SDLK_h;
+    m_SpecialKeyCombos[KeyComboArbsToggleApex].scanCode = SDL_SCANCODE_H;
+#ifdef ARBS_W
+    m_SpecialKeyCombos[KeyComboArbsToggleApex].enabled = true;
+#else
+    m_SpecialKeyCombos[KeyComboArbsToggleApex].enabled = false;
+#endif
+
+    m_SpecialKeyCombos[KeyComboArbsReconnectApex].keyCombo = KeyComboArbsReconnectApex;
+    m_SpecialKeyCombos[KeyComboArbsReconnectApex].keyCode = SDLK_j;
+    m_SpecialKeyCombos[KeyComboArbsReconnectApex].scanCode = SDL_SCANCODE_J;
+#ifdef ARBS_W
+    m_SpecialKeyCombos[KeyComboArbsReconnectApex].enabled = true;
+#else
+    m_SpecialKeyCombos[KeyComboArbsReconnectApex].enabled = false;
+#endif
+
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);
     m_OldIgnoreDevicesExcept = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
 

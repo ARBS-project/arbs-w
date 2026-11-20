@@ -9,6 +9,13 @@
 #include <QtMath>
 
 #include <QtDebug>
+#include <QDesktopServices>
+#include <QUrl>
+
+#include "path.h"
+#ifdef ARBS_W
+#include "arbs/arbs_bridge.h"
+#endif
 
 #define SER_STREAMSETTINGS "streamsettings"
 #define SER_WIDTH "width"
@@ -52,6 +59,19 @@
 #define SER_KEEPAWAKE "keepawake"
 #define SER_LANGUAGE "language"
 #define SER_RENDERER "renderer"
+
+// ARBS-W (B2 D9)
+#define SER_ARBS_AMP "arbsamp"
+#define SER_ARBS_GAIN "arbsgain"
+#define SER_ARBS_GATE "arbsgate"
+#define SER_ARBS_SILENCE "arbssilence"
+#define SER_ARBS_CURVE "arbscurve"
+#define SER_ARBS_TAPS "arbstaps"
+#define SER_ARBS_JITTER "arbsjitterfixed"
+#define SER_ARBS_TRIGGER "arbstrigger"
+#define SER_ARBS_TRIGGER_STRENGTH "arbstriggerstrength"
+#define SER_ARBS_VERBOSE "arbsverboselog"
+#define SER_CHECKFORUPDATES "checkforupdates"
 
 #define CURRENT_DEFAULT_VER 2
 
@@ -171,6 +191,24 @@ void StreamingPreferences::reload()
                                                                                                                  : UIDisplayMode::UI_MAXIMIZED)).toInt());
     language = static_cast<Language>(settings.value(SER_LANGUAGE,
                                                     static_cast<int>(Language::LANG_AUTO)).toInt());
+
+    // ARBS-W: values outside the allowed lists fall back to the ASB defaults (ARBS-A A1-4b)
+    {
+        const arbsw::ArbsSettings d;
+        arbsw::ArbsSettings s;
+        s.amp = settings.value(SER_ARBS_AMP, d.amp).toInt();
+        s.gain = settings.value(SER_ARBS_GAIN, d.gain).toDouble();
+        s.gatePct = settings.value(SER_ARBS_GATE, d.gatePct).toInt();
+        s.silence = settings.value(SER_ARBS_SILENCE, d.silence).toInt();
+        s.curve = settings.value(SER_ARBS_CURVE, d.curve).toInt();
+        s.taps = settings.value(SER_ARBS_TAPS, d.taps).toInt();
+        s.jitterFixedMs = settings.value(SER_ARBS_JITTER, d.jitterFixedMs).toInt();
+        s.trigger = settings.value(SER_ARBS_TRIGGER, d.trigger).toBool();
+        s.triggerStrength = settings.value(SER_ARBS_TRIGGER_STRENGTH, d.triggerStrength).toInt();
+        s.verbose = settings.value(SER_ARBS_VERBOSE, d.verbose).toBool();
+        setArbsSettings(arbsw::settings::normalize(s));
+    }
+    checkForUpdates = settings.value(SER_CHECKFORUPDATES, false).toBool();
 
 
     // Perform default settings updates as required based on last default version
@@ -362,6 +400,52 @@ void StreamingPreferences::save()
     settings.setValue(SER_SWAPFACEBUTTONS, swapFaceButtons);
     settings.setValue(SER_CAPTURESYSKEYS, captureSysKeysMode);
     settings.setValue(SER_KEEPAWAKE, keepAwake);
+    settings.setValue(SER_ARBS_AMP, arbsAmp);
+    settings.setValue(SER_ARBS_GAIN, arbsGain);
+    settings.setValue(SER_ARBS_GATE, arbsGate);
+    settings.setValue(SER_ARBS_SILENCE, arbsSilence);
+    settings.setValue(SER_ARBS_CURVE, arbsCurve);
+    settings.setValue(SER_ARBS_TAPS, arbsTaps);
+    settings.setValue(SER_ARBS_JITTER, arbsJitterFixed);
+    settings.setValue(SER_ARBS_TRIGGER, arbsTrigger);
+    settings.setValue(SER_ARBS_TRIGGER_STRENGTH, arbsTriggerStrength);
+    settings.setValue(SER_ARBS_VERBOSE, arbsVerboseLog);
+    settings.setValue(SER_CHECKFORUPDATES, checkForUpdates);
+}
+
+void StreamingPreferences::setArbsSettings(const arbsw::ArbsSettings& s)
+{
+    arbsAmp = s.amp;
+    arbsGain = s.gain;
+    arbsGate = s.gatePct;
+    arbsSilence = s.silence;
+    arbsCurve = s.curve;
+    arbsTaps = s.taps;
+    arbsJitterFixed = s.jitterFixedMs;
+    arbsTrigger = s.trigger;
+    arbsTriggerStrength = s.triggerStrength;
+    arbsVerboseLog = s.verbose;
+}
+
+void StreamingPreferences::restoreArbsDefaults()
+{
+    setArbsSettings(arbsw::ArbsSettings());
+    save();
+    emit arbsChanged();
+}
+
+void StreamingPreferences::openLogFolder()
+{
+    QDesktopServices::openUrl(QUrl::fromLocalFile(Path::getLogDir()));
+}
+
+QString StreamingPreferences::arbsStatus()
+{
+#ifdef ARBS_W
+    return ArbsBridge::statusText();
+#else
+    return QStringLiteral("NONE");
+#endif
 }
 
 int StreamingPreferences::getDefaultBitrate(int width, int height, int fps, bool yuv444)

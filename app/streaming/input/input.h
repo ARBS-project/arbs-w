@@ -168,6 +168,8 @@ private:
         KeyComboTogglePointerRegionLock,
         KeyComboQuitAndExit,
         KeyComboToggleKeyboardGrab,
+        KeyComboArbsToggleApex,   // ARBS-W: Ctrl+Alt+Shift+H = APEX output stop/resume
+        KeyComboArbsReconnectApex, // ARBS-W: Ctrl+Alt+Shift+J = APEX reconnect (GetInfo retry)
         KeyComboMax
     };
 

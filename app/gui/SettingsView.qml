@@ -1540,6 +1540,162 @@ Flickable {
             }
         }
 
+        // ARBS-W (B2 D9): APEX 6 Pro haptics (ARBS Core). Defaults = ApexSenseBridge defaults.
+        // Changes apply from the next stream start (same as ARBS-A).
+        GroupBox {
+            id: arbsSettingsGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"skyblue\">" + "APEX haptics (ARBS)" + "</font>"
+            font.pointSize: 12
+
+            Column {
+                id: arbsColumn
+                anchors.fill: parent
+                spacing: 5
+
+                function syncAll() {
+                    arbsAmpChoice.sync()
+                    arbsGainChoice.sync()
+                    arbsGateChoice.sync()
+                    arbsSilenceChoice.sync()
+                    arbsCurveChoice.sync()
+                    arbsTapsChoice.sync()
+                    arbsJitterChoice.sync()
+                    arbsStrengthChoice.sync()
+                    arbsTriggerCheck.checked = StreamingPreferences.arbsTrigger
+                    arbsVerboseCheck.checked = StreamingPreferences.arbsVerboseLog
+                }
+
+                Label {
+                    width: parent.width
+                    text: "Applies from the next stream. Last APEX state: " + StreamingPreferences.arbsStatus() + "\n" +
+                          "While streaming: Ctrl+Alt+Shift+H = stop/resume APEX output, Ctrl+Alt+Shift+J = reconnect APEX"
+                    font.pointSize: 10
+                    wrapMode: Text.Wrap
+                }
+
+                ArbsChoice {
+                    id: arbsAmpChoice
+                    title: "Amplitude cap (ASB default 127)"
+                    prefKey: "arbsAmp"
+                    options: [ {text: "0", val: 0}, {text: "10", val: 10}, {text: "20", val: 20}, {text: "30", val: 30},
+                               {text: "40", val: 40}, {text: "50", val: 50}, {text: "60", val: 60}, {text: "80", val: 80},
+                               {text: "100", val: 100}, {text: "127 (ASB default)", val: 127} ]
+                }
+
+                ArbsChoice {
+                    id: arbsGainChoice
+                    title: "Gain (ASB default 1.0)"
+                    prefKey: "arbsGain"
+                    options: [ {text: "1.0 (ASB default)", val: 1.0}, {text: "2.0", val: 2.0}, {text: "3.0", val: 3.0},
+                               {text: "4.0", val: 4.0}, {text: "6.0", val: 6.0}, {text: "8.0", val: 8.0} ]
+                }
+
+                ArbsChoice {
+                    id: arbsGateChoice
+                    title: "Noise gate (ASB default off)"
+                    prefKey: "arbsGate"
+                    options: [ {text: "Off (ASB default)", val: 0}, {text: "1 %FS", val: 1}, {text: "2 %FS", val: 2}, {text: "4 %FS", val: 4} ]
+                }
+
+                ArbsChoice {
+                    id: arbsSilenceChoice
+                    title: "Silence handling (ASB default mode 1)"
+                    prefKey: "arbsSilence"
+                    options: [ {text: "Mode 1: neutral keepalive every 50 ms (ASB default)", val: 1},
+                               {text: "Mode 2: neutral keepalive every 200 ms", val: 2},
+                               {text: "Mode 3: suspend grip after 2 s of silence", val: 3},
+                               {text: "Mode 4: send nothing while silent", val: 4} ]
+                }
+
+                ArbsChoice {
+                    id: arbsCurveChoice
+                    title: "Amplitude curve (ASB default ASB)"
+                    prefKey: "arbsCurve"
+                    options: [ {text: "ASB (default)", val: 0}, {text: "tanh", val: 1} ]
+                }
+
+                ArbsChoice {
+                    id: arbsTapsChoice
+                    title: "Filter taps (ASB default 321)"
+                    prefKey: "arbsTaps"
+                    options: [ {text: "161", val: 161}, {text: "321 (ASB default)", val: 321}, {text: "641", val: 641} ]
+                }
+
+                ArbsChoice {
+                    id: arbsJitterChoice
+                    title: "Jitter buffer (default auto = p95 + 4 ms)"
+                    prefKey: "arbsJitterFixed"
+                    options: [ {text: "Auto: p95 + 4 ms (default)", val: 0}, {text: "Fixed 16 ms", val: 16}, {text: "Fixed 24 ms", val: 24},
+                               {text: "Fixed 32 ms", val: 32}, {text: "Fixed 48 ms", val: 48}, {text: "Fixed 64 ms", val: 64},
+                               {text: "Fixed 80 ms", val: 80} ]
+                }
+
+                CheckBox {
+                    id: arbsTriggerCheck
+                    width: parent.width
+                    text: "Trigger haptics (adaptive trigger effects on the APEX triggers)"
+                    font.pointSize: 12
+                    checked: StreamingPreferences.arbsTrigger
+                    onCheckedChanged: {
+                        StreamingPreferences.arbsTrigger = checked
+                    }
+                }
+
+                ArbsChoice {
+                    id: arbsStrengthChoice
+                    title: "Trigger haptics strength (default 100%)"
+                    prefKey: "arbsTriggerStrength"
+                    options: [ {text: "0%", val: 0}, {text: "20%", val: 20}, {text: "40%", val: 40}, {text: "60%", val: 60},
+                               {text: "80%", val: 80}, {text: "100% (default)", val: 100} ]
+                }
+
+                CheckBox {
+                    id: arbsVerboseCheck
+                    width: parent.width
+                    text: "Verbose APEX log (keep per-second lines after 20 MB)"
+                    font.pointSize: 12
+                    checked: StreamingPreferences.arbsVerboseLog
+                    onCheckedChanged: {
+                        StreamingPreferences.arbsVerboseLog = checked
+                    }
+                }
+
+                Row {
+                    spacing: 10
+
+                    Button {
+                        id: arbsRestoreButton
+                        text: "Restore ASB defaults"
+                        onClicked: {
+                            StreamingPreferences.restoreArbsDefaults()
+                            arbsColumn.syncAll()
+                        }
+                    }
+
+                    Button {
+                        id: arbsOpenLogButton
+                        text: "Open log folder"
+                        onClicked: {
+                            StreamingPreferences.openLogFolder()
+                        }
+                    }
+                }
+
+                CheckBox {
+                    id: checkForUpdatesCheck
+                    width: parent.width
+                    text: "Check for Moonlight updates at startup (off by default)"
+                    font.pointSize: 12
+                    checked: StreamingPreferences.checkForUpdates
+                    onCheckedChanged: {
+                        StreamingPreferences.checkForUpdates = checked
+                    }
+                }
+            }
+        }
+
         GroupBox {
             id: advancedSettingsGroupBox
             width: (parent.width - (parent.leftPadding + parent.rightPadding))

@@ -378,7 +378,10 @@ ApplicationWindow {
 
                 Component.onCompleted: {
                     AutoUpdateChecker.onUpdateAvailable.connect(updateAvailable)
-                    AutoUpdateChecker.start()
+                    // ARBS-W: update check kept but off by default (StreamingPreferences.checkForUpdates)
+                    if (StreamingPreferences.checkForUpdates) {
+                        AutoUpdateChecker.start()
+                    }
                 }
 
                 Keys.onDownPressed: {

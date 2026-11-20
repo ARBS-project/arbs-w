@@ -3,6 +3,10 @@
 #include <Limelight.h>
 #include "SDL_compat.h"
 
+#ifdef ARBS_W
+#include "arbs/arbs_bridge.h"
+#endif
+
 #define VK_0 0x30
 #define VK_A 0x41
 
@@ -175,6 +179,22 @@ void SdlInputHandler::performSpecialKeyCombo(KeyCombo combo)
         }
 
         updateKeyboardGrabState();
+        break;
+
+    case KeyComboArbsToggleApex:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Detected ARBS APEX stop/resume combo");
+#ifdef ARBS_W
+        ArbsBridge::toggleUserStop();
+#endif
+        break;
+
+    case KeyComboArbsReconnectApex:
+        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "Detected ARBS APEX reconnect combo");
+#ifdef ARBS_W
+        ArbsBridge::reconnect();
+#endif
         break;
 
     default:

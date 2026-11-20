@@ -7,6 +7,10 @@
 
 #include <QtMath>
 
+#ifdef ARBS_W
+#include "arbs/arbs_bridge.h"
+#endif
+
 // How long the Start button must be pressed to toggle mouse emulation
 #define MOUSE_EMULATION_LONG_PRESS_TIME 750
 
@@ -217,10 +221,23 @@ void SdlInputHandler::handleControllerAxisEvent(SDL_ControllerAxisEvent* event)
         return;
     }
 
+#ifdef ARBS_W
+    // ARBS-W: APEX input seen (GetInfo readiness) + trigger positions for the trigger effects
+    const bool arbsApex = ArbsBridge::isApexJoystick(gameControllerId);
+    if (arbsApex) {
+        ArbsBridge::onApexInput();
+    }
+#endif
+
     // Batch all pending axis motion events for this gamepad to save CPU time
     SDL_Event nextEvent;
     bool dirty = false;
     for (;;) {
+#ifdef ARBS_W
+        if (arbsApex && (event->axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || event->axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+            ArbsBridge::onApexTriggerAxis(event->axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT, event->value);
+        }
+#endif
         switch (event->axis)
         {
             case SDL_CONTROLLER_AXIS_LEFTX:
@@ -287,6 +304,12 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
     if (state == NULL) {
         return;
     }
+
+#ifdef ARBS_W
+    if (ArbsBridge::isApexJoystick(event->which)) {
+        ArbsBridge::onApexInput();
+    }
+#endif
 
     if (m_SwapFaceButtons) {
         switch (event->button) {
@@ -649,6 +672,12 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             SDL_free((void*)mapping);
         }
 
+#ifdef ARBS_W
+        // ARBS-W: APEX 2.4G dongle? (SDL VID/PID 37D7/2502, or XInput fallback 045E/028E with exactly one dongle and
+        // one such pad) -> IF2 opened, ARBS Core attached; reported to the host as a PS controller with PCM haptics.
+        const bool arbsApex = ArbsBridge::onGamepadAdded(state->index, state->jsId, vendorId, productId);
+#endif
+
         // Add this gamepad to the gamepad mask
         if (m_MultiController) {
             // NB: Don't assert that it's unset here because we will already
@@ -752,6 +781,14 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             break;
         }
 
+#ifdef ARBS_W
+        if (arbsApex) {
+            // DualSense-style report: PS type + analog triggers + rumble + PCM haptics (0x8000), no trigger rumble
+            type = ArbsBridge::apexType();
+            capabilities = ArbsBridge::apexCaps(capabilities);
+        }
+#endif
+
         // If this is a PlayStation controller that doesn't have a touchpad button mapped,
         // we'll allow the Select+PS button combo to act as the touchpad.
         state->clickpadButtonEmulationEnabled =
@@ -760,6 +797,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
             type == LI_CTYPE_PS;
 
+#ifdef ARBS_W
+        if (arbsApex) {
+            // Only while the stream is live, once per attach; rc goes to the ARBS log
+            ArbsBridge::sendApexArrival(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
+        }
+        else
+#endif
         LiSendControllerArrivalEvent(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
 #else
 
@@ -786,6 +830,11 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             if (state->haptic != nullptr) {
                 SDL_HapticClose(state->haptic);
             }
+#endif
+
+#ifdef ARBS_W
+            // APEX removed: stop sequence (if active) and close IF2
+            ArbsBridge::onGamepadRemoved(state->jsId);
 #endif
 
             // Remove this from the gamepad mask in MC-mode

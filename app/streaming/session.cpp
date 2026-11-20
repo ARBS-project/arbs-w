@@ -15,6 +15,10 @@
 #include "video/slvid.h"
 #endif
 
+#ifdef ARBS_W
+#include "arbs/arbs_bridge.h"
+#endif
+
 #ifdef Q_OS_WIN32
 // Scaling the icon down on Win32 looks dreadful, so render at lower res
 #define ICON_SIZE 32
@@ -61,6 +65,11 @@ CONNECTION_LISTENER_CALLBACKS Session::k_ConnCallbacks = {
     Session::clSetMotionEventState,
     Session::clSetControllerLED,
     Session::clSetAdaptiveTriggers
+#ifdef ARBS_W
+    // ARBS-W: 14th member = controllerHaptics (SDP then advertises ML_FF_HAPTICS_PCM; the host only sends PCM to a
+    // controller whose arrival carried LI_CCAP_HAPTICS_PCM, i.e. the APEX)
+    , Session::clControllerHaptics
+#endif
 };
 
 Session* Session::s_ActiveSession;
@@ -158,6 +167,13 @@ void Session::clLogMessage(const char* format, ...)
 
 void Session::clRumble(unsigned short controllerNumber, unsigned short lowFreqMotor, unsigned short highFreqMotor)
 {
+#ifdef ARBS_W
+    // APEX: rumble goes to ARBS Core (grip synthesis), not to SDL/XInput
+    if (ArbsBridge::consumeRumble(controllerNumber, lowFreqMotor, highFreqMotor)) {
+        return;
+    }
+#endif
+
     // We push an event for the main thread to handle in order to properly synchronize
     // with the removal of game controllers that could result in our game controller
     // going away during this callback.
@@ -214,6 +230,12 @@ void Session::clSetHdrMode(bool enabled)
 
 void Session::clRumbleTriggers(uint16_t controllerNumber, uint16_t leftTrigger, uint16_t rightTrigger)
 {
+#ifdef ARBS_W
+    if (ArbsBridge::consumeRumbleTriggers(controllerNumber, leftTrigger, rightTrigger)) {
+        return;
+    }
+#endif
+
     // We push an event for the main thread to handle in order to properly synchronize
     // with the removal of game controllers that could result in our game controller
     // going away during this callback.
@@ -252,6 +274,13 @@ void Session::clSetControllerLED(uint16_t controllerNumber, uint8_t r, uint8_t g
 }
 
 void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t *left, uint8_t *right){
+#ifdef ARBS_W
+    // APEX: adaptive trigger effects go to ARBS Core (trigger motors), no SDL event
+    if (ArbsBridge::consumeAdaptiveTriggers(controllerNumber, eventFlags, typeLeft, typeRight, left, right)) {
+        return;
+    }
+#endif
+
     // We push an event for the main thread to handle in order to properly synchronize
     // with the removal of game controllers that could result in our game controller
     // going away during this callback.
@@ -272,6 +301,19 @@ void Session::clSetAdaptiveTriggers(uint16_t controllerNumber, uint8_t eventFlag
 
     setControllerLEDEvent.user.data2 = (void *) state;
     SDL_PushEvent(&setControllerLEDEvent);
+}
+
+void Session::clControllerHaptics(uint16_t controllerNumber, uint32_t sequence, const uint8_t* pcm, uint16_t frames)
+{
+#ifdef ARBS_W
+    // Control receive thread: must not block. The bridge copies the borrowed samples and returns.
+    ArbsBridge::onPcm(controllerNumber, sequence, pcm, frames);
+#else
+    Q_UNUSED(controllerNumber);
+    Q_UNUSED(sequence);
+    Q_UNUSED(pcm);
+    Q_UNUSED(frames);
+#endif
 }
 
 
@@ -1729,6 +1771,11 @@ bool Session::startConnectionAsync()
         return false;
     }
 
+#ifdef ARBS_W
+    // ARBS-W: stream is live -> apply APEX settings (engine inactive) and release a deferred APEX arrival
+    ArbsBridge::onStreamLive(*m_Preferences);
+#endif
+
     emit connectionStarted();
     return true;
 }
@@ -1798,6 +1845,9 @@ void Session::exec()
 {
     // If the connection failed, clean up and abort the connection.
     if (!m_AsyncConnectionSuccess) {
+#ifdef ARBS_W
+        ArbsBridge::onStreamEnd("연결 실패");
+#endif
         delete m_InputHandler;
         m_InputHandler = nullptr;
         SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -1885,6 +1935,9 @@ void Session::exec()
                          "SDL_CreateWindow() failed: %s",
                          SDL_GetError());
 
+#ifdef ARBS_W
+            ArbsBridge::onStreamEnd("창 생성 실패");
+#endif
             delete m_InputHandler;
             m_InputHandler = nullptr;
             SDL_QuitSubSystem(SDL_INIT_VIDEO);
@@ -2053,6 +2106,11 @@ void Session::exec()
                 m_InputHandler->setAdaptiveTriggers((uint16_t)(uintptr_t)event.user.data1,
                                                     (DualSenseOutputReport *)event.user.data2);
                 break;
+#ifdef ARBS_W
+            case ARBS_SDL_CODE_STREAM_LIVE:
+                ArbsBridge::onMainThreadStreamLive(event.user.data1 != nullptr);
+                break;
+#endif
             default:
                 SDL_assert(false);
             }
@@ -2076,6 +2134,15 @@ void Session::exec()
             case SDL_WINDOWEVENT_LEAVE:
                 m_InputHandler->notifyMouseLeave();
                 break;
+#ifdef ARBS_W
+            case SDL_WINDOWEVENT_MINIMIZED:
+                ArbsBridge::onWindowMinimized();
+                break;
+            case SDL_WINDOWEVENT_RESTORED:
+            case SDL_WINDOWEVENT_MAXIMIZED:
+                ArbsBridge::onWindowRestored();
+                break;
+#endif
             }
 
             presence.runCallbacks();
@@ -2339,6 +2406,11 @@ DispatchDeferredCleanup:
 
     // Raise any keys that are still down
     m_InputHandler->raiseAllKeys();
+
+#ifdef ARBS_W
+    // ARBS-W: APEX stop sequence + session summary, then close IF2 (before the SDL gamepads are closed)
+    ArbsBridge::onStreamEnd("세션 종료");
+#endif
 
     // Destroy the input handler now. This must be destroyed
     // before allowwing the UI to continue execution or it could

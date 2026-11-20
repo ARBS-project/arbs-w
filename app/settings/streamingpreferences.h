@@ -4,6 +4,8 @@
 #include <QRect>
 #include <QQmlEngine>
 
+#include "arbs/arbs_settings.h"
+
 class StreamingPreferences : public QObject
 {
     Q_OBJECT
@@ -158,6 +160,26 @@ public:
     Q_PROPERTY(CaptureSysKeysMode captureSysKeysMode MEMBER captureSysKeysMode NOTIFY captureSysKeysModeChanged)
     Q_PROPERTY(Language language MEMBER language NOTIFY languageChanged);
 
+    // ARBS-W (B2 D9): APEX haptics settings (ASB defaults, ARBS-A ArbsSettings.java) + update check switch.
+    Q_PROPERTY(int arbsAmp MEMBER arbsAmp NOTIFY arbsChanged)
+    Q_PROPERTY(double arbsGain MEMBER arbsGain NOTIFY arbsChanged)
+    Q_PROPERTY(int arbsGate MEMBER arbsGate NOTIFY arbsChanged)
+    Q_PROPERTY(int arbsSilence MEMBER arbsSilence NOTIFY arbsChanged)
+    Q_PROPERTY(int arbsCurve MEMBER arbsCurve NOTIFY arbsChanged)
+    Q_PROPERTY(int arbsTaps MEMBER arbsTaps NOTIFY arbsChanged)
+    Q_PROPERTY(int arbsJitterFixed MEMBER arbsJitterFixed NOTIFY arbsChanged)
+    Q_PROPERTY(bool arbsTrigger MEMBER arbsTrigger NOTIFY arbsChanged)
+    Q_PROPERTY(int arbsTriggerStrength MEMBER arbsTriggerStrength NOTIFY arbsChanged)
+    Q_PROPERTY(bool arbsVerboseLog MEMBER arbsVerboseLog NOTIFY arbsChanged)
+    Q_PROPERTY(bool checkForUpdates MEMBER checkForUpdates NOTIFY checkForUpdatesChanged)
+
+    // [Restore ASB defaults]: resets the ARBS items above (not checkForUpdates) and saves.
+    Q_INVOKABLE void restoreArbsDefaults();
+    // [Open log folder]: opens the folder holding Moonlight-*.log and ARBS-*.log.
+    Q_INVOKABLE void openLogFolder();
+    // Last APEX engine state (NONE / PROBING n/10 / READY / UNSUPPORTED / USER_STOP).
+    Q_INVOKABLE QString arbsStatus();
+
     Q_INVOKABLE bool retranslate();
 
     // Directly accessible members for preferences
@@ -200,6 +222,17 @@ public:
     Language language;
     CaptureSysKeysMode captureSysKeysMode;
     RendererSelection rendererSelection;
+    int arbsAmp;
+    double arbsGain;
+    int arbsGate;
+    int arbsSilence;
+    int arbsCurve;
+    int arbsTaps;
+    int arbsJitterFixed;
+    bool arbsTrigger;
+    int arbsTriggerStrength;
+    bool arbsVerboseLog;
+    bool checkForUpdates;
 
 signals:
     void displayModeChanged();
@@ -238,11 +271,15 @@ signals:
     void keepAwakeChanged();
     void languageChanged();
     void rendererSelectionChanged();
+    void arbsChanged();
+    void checkForUpdatesChanged();
 
 private:
     explicit StreamingPreferences(QQmlEngine *qmlEngine);
 
     QString getSuffixFromLanguage(Language lang);
+
+    void setArbsSettings(const arbsw::ArbsSettings& s);
 
     QQmlEngine* m_QmlEngine;
 };
