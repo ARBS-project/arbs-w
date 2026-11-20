@@ -10,10 +10,20 @@
 #pragma once
 
 #include <QString>
+#include <climits>
 #include <cstdint>
 
 // SDL user event code posted by onStreamLive() for the main thread (session.cpp handles it).
 #define ARBS_SDL_CODE_STREAM_LIVE 190
+// B2b 2-1: delayed APEX check (presumed match), posted by an SDL timer; data1 = binder generation.
+#define ARBS_SDL_CODE_APEX_CHECK 191
+
+// B2b: binding change that gamepad.cpp must report to the host (arrival / removal packets).
+struct ArbsBind {
+    static constexpr int kNone = INT_MIN;
+    int boundJs = kNone;    // this joystick is now the APEX (PS type + PCM caps arrival needed)
+    int unboundJs = kNone;  // this still-connected joystick is no longer the APEX (normal arrival needed)
+};
 
 class StreamingPreferences;
 
@@ -45,14 +55,24 @@ public:
                                         const uint8_t* left, const uint8_t* right);
 
     // ---- gamepad.cpp (main thread) ----
-    // DEVICEADDED: identifies the APEX (design 4-3) and, if it is one, opens IF2 and attaches the engine.
-    static bool onGamepadAdded(int playerIndex, int joystickId, uint16_t sdlVid, uint16_t sdlPid);
+    // DEVICEADDED: identifies the APEX (B2b 2-1: exact VID/PID first, XInput fallback only after 1000 ms without an
+    // exact pad, re-bind presumed -> exact). On a bind: IF2 opened, engine attached, trigger positions seeded.
+    static ArbsBind onGamepadAdded(int playerIndex, int joystickId, uint16_t sdlVid, uint16_t sdlPid);
+    // ARBS_SDL_CODE_APEX_CHECK (session.cpp -> SdlInputHandler): delayed presumed check.
+    static ArbsBind onApexCheck(int generation);
+    // Slot move (APEX first numbering): keeps the binder / engine controller number in step.
+    static void onGamepadIndexChanged(int joystickId, int playerIndex);
+    static bool isExactPad(uint16_t sdlVid, uint16_t sdlPid);  // 37D7/2502
+    static bool sdlListHasExact();                            // any 37D7/2502 device in the SDL joystick list
+    static bool apexBound();
+    static void log(const char* line);                        // one ARBS log line (UTF-8)
     static uint32_t apexCaps(uint32_t sdlCaps);
     static uint8_t apexType();
     // Arrival for the APEX goes through the stream-live gate (sent at most once per attach while live).
     static void sendApexArrival(int playerIndex, uint16_t activeGamepadMask, uint8_t type, uint32_t supportedButtons,
                                 uint32_t capabilities);
-    static void onGamepadRemoved(int joystickId);
+    // DEVICEREMOVED: only the bound pad detaches the engine (2-4); then a remaining exact pad is bound at once.
+    static ArbsBind onGamepadRemoved(int joystickId);
     static bool isApexJoystick(int joystickId);
     static void onApexInput();
     static void onApexTriggerAxis(bool left, int sdlAxisValue);

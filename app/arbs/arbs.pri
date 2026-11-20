@@ -33,6 +33,7 @@ HEADERS += \
     $$PWD/arbs_bridge.h \
     $$PWD/arbs_log.h \
     $$PWD/arbs_logic.h \
+    $$PWD/arbs_numbering.h \
     $$PWD/arbs_policy.h \
     $$PWD/arbs_settings.h \
     $$PWD/win_clock.h \

@@ -2110,6 +2110,9 @@ void Session::exec()
             case ARBS_SDL_CODE_STREAM_LIVE:
                 ArbsBridge::onMainThreadStreamLive(event.user.data1 != nullptr);
                 break;
+            case ARBS_SDL_CODE_APEX_CHECK:
+                m_InputHandler->arbsHandleApexCheck((int)(intptr_t)event.user.data1);
+                break;
 #endif
             default:
                 SDL_assert(false);

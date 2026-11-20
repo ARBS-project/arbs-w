@@ -23,7 +23,9 @@
 #include <thread>
 #include <vector>
 
+#include "arbs/engine.h"
 #include "arbs/java_compat.h"
+#include "fakes.h"
 #include "arbs_log.h"
 #include "arbs_logic.h"
 #include "arbs_policy.h"
@@ -555,6 +557,531 @@ TEST(w_port, destructor_stops_idle_reader) {
     CHECK(ms < 1000);  // pending ReadFile cancelled, thread joined promptly
     CHECK(log.has("IF2 닫힘"));
     CloseHandle(p.server);
+}
+
+// ================================================================================================ B2b (T1..T13)
+// docs/analysis/B2b_APEX_ID.md section 5 2-6. The binder / numbering rules are pure; HostSim below replays the exact
+// order gamepad.cpp uses at DEVICEADDED / check / DEVICEREMOVED (slot plan -> move -> bind decision -> moved pad
+// arrival -> lost-binding re-report -> this pad's arrival) and records the packets sent to the host.
+namespace {
+
+constexpr uint16_t kBuiltinVid = 0x045E, kBuiltinPid = 0x028E;  // AOKZOE A1 Pro built-in pad (SDL XInput fallback)
+constexpr uint16_t kApexV = 0x37D7, kApexP = 0x2502;
+constexpr int kBuiltinJs = 100, kApexJs = 101, kOtherJs = 102;
+using BA = ApexBinder::Action;
+
+struct HostSim {
+    bool multi;
+    bool apexFirst;
+    int if2 = 1;
+    bool listExact = false;  // a 37D7/2502 device in the SDL joystick list
+    int64_t now = 0;
+    HostLedger led;
+    ApexBinder binder;
+    uint16_t mask;
+    struct Slot {
+        bool used = false;
+        int js = 0;
+        uint16_t vid = 0, pid = 0;
+        bool skipped = false;
+    } slots[16];
+    std::vector<std::string> packets;
+    int64_t pendingCheck = -1;
+
+    HostSim(bool m, bool a, int attached) : multi(m), apexFirst(a) {
+        mask = multi ? static_cast<uint16_t>((1u << attached) - 1) : 1;  // getAttachedGamepadMask()
+    }
+    int slotOf(int js) const {
+        for (int i = 0; i < 16; i++)
+            if (slots[i].used && slots[i].js == js) return i;
+        return -1;
+    }
+    int indexOfSlot(int s) const { return multi ? s : 0; }
+    bool bound(int js) const { return binder.boundJs() == js; }
+    void run(const std::vector<HostStep>& steps, int js) {
+        for (const HostStep& s : steps) {
+            char b[64];
+            if (s.kind == HostStep::Kind::Remove) std::snprintf(b, sizeof b, "R%d/m=0x%x", s.index, s.mask);
+            else std::snprintf(b, sizeof b, "A%d:%s/m=0x%x", s.index, s.apex ? "apex" : "norm", s.mask);
+            packets.push_back(b);
+            led.sent(s, js);
+        }
+    }
+    void arrive(int slot, bool asApex) {
+        Slot& p = slots[slot];
+        if (skipArrivalSingle(multi, apexFirst, isExactVidPid(p.vid, p.pid), asApex, binder.boundJs() != ApexBinder::kNone, listExact)) {
+            p.skipped = true;
+            packets.push_back("skip" + std::to_string(p.js));
+            return;
+        }
+        p.skipped = false;
+        run(planArrival(led, multi, apexFirst, indexOfSlot(slot), asApex, p.js, mask), p.js);
+    }
+    void applyLost(int js) {
+        const int s = slotOf(js);
+        if (s >= 0) run(planUnbind(led, multi, indexOfSlot(s), mask), js);
+    }
+    void applyBound(int js) {
+        const int s = slotOf(js);
+        if (s >= 0) arrive(s, true);
+    }
+    void note(const ApexBinder::Decision& d) {
+        if (d.checkAtMs >= 0) pendingCheck = d.checkAtMs;
+    }
+    ApexBinder::Decision add(int js, uint16_t vid, uint16_t pid) {
+        bool occ[16];
+        for (int i = 0; i < 16; i++) occ[i] = slots[i].used;
+        const bool slot0Exact = occ[0] && isExactVidPid(slots[0].vid, slots[0].pid);
+        const SlotPlan plan = planSlot(occ, 16, multi, apexFirst, slot0Exact, isExactVidPid(vid, pid), listExact);
+        if (plan.slot < 0) return ApexBinder::Decision();
+        if (plan.moveTo >= 0) {
+            slots[plan.moveTo] = slots[0];
+            slots[0] = Slot();
+            mask = static_cast<uint16_t>(mask | (1u << plan.moveTo));
+            binder.onIndexChanged(slots[plan.moveTo].js, plan.moveTo);
+        }
+        Slot& p = slots[plan.slot];
+        p.used = true;
+        p.js = js;
+        p.vid = vid;
+        p.pid = pid;
+        const int idx = indexOfSlot(plan.slot);
+        const ApexBinder::Decision d = binder.onPadAdded(js, idx, vid, pid, now, isExactVidPid(vid, pid) ? if2 : -1, listExact);
+        note(d);
+        if (multi) mask = static_cast<uint16_t>(mask | (1u << idx));
+        if (plan.moveTo >= 0) arrive(plan.moveTo, bound(slots[plan.moveTo].js));
+        if (d.unbindJs != ApexBinder::kNone) applyLost(d.unbindJs);
+        arrive(plan.slot, bound(js));
+        return d;
+    }
+    ApexBinder::Decision check() {
+        const ApexBinder::Decision d = binder.onCheck(now, if2, listExact);
+        pendingCheck = -1;
+        note(d);
+        if (d.unbindJs != ApexBinder::kNone) applyLost(d.unbindJs);
+        if (d.bindJs != ApexBinder::kNone) applyBound(d.bindJs);
+        return d;
+    }
+    ApexBinder::Decision remove(int js) {
+        const int s = slotOf(js);
+        const ApexBinder::Decision d = binder.onPadRemoved(js, now, if2);
+        note(d);
+        if (s >= 0) {
+            const int idx = indexOfSlot(s);
+            if (multi) mask = static_cast<uint16_t>(mask & ~(1u << idx));
+            char b[32];
+            std::snprintf(b, sizeof b, "gone%d/m=0x%x", idx, mask);  // upstream final MC packet
+            packets.push_back(b);
+            if (multi) led.removed(idx);
+            slots[s] = Slot();
+        }
+        if (d.bindJs != ApexBinder::kNone) applyBound(d.bindJs);
+        return d;
+    }
+    bool has(const std::string& p) const { return std::find(packets.begin(), packets.end(), p) != packets.end(); }
+    std::string all() const {
+        std::string s;
+        for (const std::string& p : packets) s += p + " ";
+        return s;
+    }
+};
+
+}  // namespace
+
+// T1: built-in 045e/028e first, then the APEX 37d7/2502 (both in the SDL list from the start), IF2 1
+TEST(b2b_bind, t01_builtin_then_apex_exact_wins) {
+    {
+        ApexBinder b;
+        const auto d1 = b.onPadAdded(kBuiltinJs, 0, kBuiltinVid, kBuiltinPid, 0, -1, true);
+        CHECK(d1.action == BA::None);
+        CHECK_EQ(d1.checkAtMs, -1LL);  // 37d7/2502 is in the SDL list: no presumed check at all
+        CHECK(d1.why.find("추정 매칭 안 함") != std::string::npos);
+        const auto d2 = b.onPadAdded(kApexJs, 1, kApexV, kApexP, 3, 1, true);
+        CHECK(d2.action == BA::BindExact);
+        CHECK_EQ(d2.bindJs, kApexJs);
+        CHECK(d2.bindKind == ApexMatch::Exact);
+        CHECK_EQ(b.boundJs(), kApexJs);
+    }
+    {  // multi + APEX first: APEX = 0, built-in = 1
+        HostSim h(true, true, 2);
+        h.listExact = true;
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.add(kApexJs, kApexV, kApexP);
+        CHECK_EQ(h.slotOf(kApexJs), 0);
+        CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+        CHECK_MSG(h.all() == "A1:norm/m=0x3 A0:apex/m=0x3 ", h.all());
+        CHECK(h.led.role(0) == HostRole::Apex);
+        CHECK(h.led.role(1) == HostRole::Normal);
+    }
+    {  // single + APEX first: built-in arrival skipped, APEX arrival creates number 0 (K1)
+        HostSim h(false, true, 2);
+        h.listExact = true;
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.add(kApexJs, kApexV, kApexP);
+        CHECK_MSG(h.all() == "skip100 A0:apex/m=0x1 ", h.all());
+        CHECK(h.led.role(0) == HostRole::Apex);
+        CHECK_EQ(h.led.creator(0), kApexJs);
+        CHECK_EQ(apexCaps(0x40) & 0x8000u, 0x8000u);  // the APEX arrival carries PCM caps
+    }
+    {  // multi + APEX first off: upstream numbering, identification still exact
+        HostSim h(true, false, 2);
+        h.listExact = true;
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.add(kApexJs, kApexV, kApexP);
+        CHECK_MSG(h.all() == "A0:norm/m=0x3 A1:apex/m=0x3 ", h.all());
+        CHECK_EQ(h.binder.boundJs(), kApexJs);
+    }
+}
+
+// T2: reversed order (APEX first, then the built-in pad): same binding, same numbers
+TEST(b2b_bind, t02_apex_then_builtin) {
+    {
+        ApexBinder b;
+        CHECK(b.onPadAdded(kApexJs, 0, kApexV, kApexP, 0, 1, true).action == BA::BindExact);
+        const auto d = b.onPadAdded(kBuiltinJs, 1, kBuiltinVid, kBuiltinPid, 2, -1, true);
+        CHECK(d.action == BA::None);
+        CHECK_EQ(d.checkAtMs, -1LL);
+        CHECK_EQ(b.boundJs(), kApexJs);
+    }
+    {
+        HostSim h(true, true, 2);
+        h.listExact = true;
+        h.add(kApexJs, kApexV, kApexP);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        CHECK_EQ(h.slotOf(kApexJs), 0);
+        CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+        CHECK_MSG(h.all() == "A0:apex/m=0x3 A1:norm/m=0x3 ", h.all());
+    }
+    {
+        HostSim h(false, true, 2);
+        h.listExact = true;
+        h.add(kApexJs, kApexV, kApexP);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        CHECK_MSG(h.all() == "A0:apex/m=0x1 skip100 ", h.all());
+    }
+}
+
+// T3: only a 045e/028e pad (APEX behind the XInput fallback) + one IF2: presumed only after 1000 ms
+TEST(b2b_bind, t03_fallback_presumed_after_1000ms) {
+    ApexBinder b;
+    const auto d = b.onPadAdded(kBuiltinJs, 0, kBuiltinVid, kBuiltinPid, 5000, -1, false);
+    CHECK(d.action == BA::None);
+    CHECK_EQ(d.checkAtMs, 6000LL);
+    CHECK(b.checkNeedsIf2());
+    const auto early = b.onCheck(5999, 1, false);
+    CHECK(early.action == BA::None);
+    CHECK_EQ(early.checkAtMs, 6000LL);  // rescheduled
+    const auto at = b.onCheck(6000, 1, false);
+    CHECK(at.action == BA::BindPresumed);
+    CHECK_EQ(at.bindJs, kBuiltinJs);
+    CHECK(at.bindKind == ApexMatch::Presumed);
+    CHECK(b.boundKind() == ApexMatch::Presumed);
+    CHECK(b.onCheck(7000, 1, false).action == BA::None);  // no pending check any more
+    // a second fallback pad arriving later does not move the scheduled time earlier
+    ApexBinder c;
+    CHECK_EQ(c.onPadAdded(1, 0, kBuiltinVid, kBuiltinPid, 0, -1, false).checkAtMs, 1000LL);
+    CHECK_EQ(c.onPadAdded(2, 1, 0x054C, 0x0CE6, 400, -1, false).checkAtMs, -1LL);  // DualSense: normal pad
+    // the APEX shows up in the SDL list (not yet opened) before the check: no presumed match
+    CHECK(c.onCheck(1000, 1, true).action == BA::None);
+}
+
+// T4: presumed binding, then the real 37d7/2502 pad appears -> re-bind + host re-reports in channel order
+TEST(b2b_bind, t04_presumed_then_exact_rebind_and_reports) {
+    {  // multi + APEX first
+        HostSim h(true, true, 1);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        CHECK_EQ(h.pendingCheck, 1000LL);
+        h.now = 1000;
+        const auto c = h.check();
+        CHECK(c.action == BA::BindPresumed);
+        h.now = 9000;
+        h.listExact = true;
+        const auto d = h.add(kApexJs, kApexV, kApexP);
+        CHECK(d.action == BA::Rebind);
+        CHECK_EQ(d.unbindJs, kBuiltinJs);
+        CHECK_EQ(d.unbindIndex, 1);  // already moved to slot 1 before the decision
+        CHECK_EQ(d.bindJs, kApexJs);
+        CHECK_EQ(d.bindIndex, 0);
+        CHECK_EQ(h.slotOf(kApexJs), 0);
+        CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+        // initial normal arrival, presumed re-report on 0, moved pad on 1 (mask keeps bit 0), then 0 removed + APEX
+        CHECK_MSG(h.all() == "A0:norm/m=0x1 R0/m=0x0 A0:apex/m=0x1 A1:norm/m=0x3 R0/m=0x2 A0:apex/m=0x3 ", h.all());
+        CHECK(h.led.role(0) == HostRole::Apex);
+        CHECK(h.led.role(1) == HostRole::Normal);
+        CHECK_EQ(h.binder.indexOf(kBuiltinJs), 1);
+    }
+    {  // single + APEX first: number 0 already PS/PCM -> no removal, the APEX arrival is a no-op for the host
+        HostSim h(false, true, 1);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.now = 1000;
+        CHECK(h.check().action == BA::BindPresumed);
+        h.listExact = true;
+        CHECK(h.add(kApexJs, kApexV, kApexP).action == BA::Rebind);
+        CHECK_MSG(h.all() == "A0:norm/m=0x1 R0/m=0x0 A0:apex/m=0x1 A0:apex/m=0x1 ", h.all());
+        CHECK(h.led.role(0) == HostRole::Apex);
+    }
+    {  // multi + APEX first off: no move; the old number gets a normal arrival again, the APEX keeps its own number
+        HostSim h(true, false, 1);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.now = 1000;
+        CHECK(h.check().action == BA::BindPresumed);
+        h.listExact = true;
+        CHECK(h.add(kApexJs, kApexV, kApexP).action == BA::Rebind);
+        CHECK_MSG(h.all() == "A0:norm/m=0x1 R0/m=0x0 A0:apex/m=0x1 R0/m=0x2 A0:norm/m=0x3 A1:apex/m=0x3 ", h.all());
+    }
+}
+
+// T5: exact APEX bound, the built-in pad is removed -> no detach
+TEST(b2b_bind, t05_other_pad_removed_keeps_engine) {
+    ApexBinder b;
+    b.onPadAdded(kBuiltinJs, 1, kBuiltinVid, kBuiltinPid, 0, -1, true);
+    CHECK(b.onPadAdded(kApexJs, 0, kApexV, kApexP, 1, 1, true).action == BA::BindExact);
+    CHECK(!b.removalNeedsIf2(kBuiltinJs));
+    const auto d = b.onPadRemoved(kBuiltinJs, 2000, -1);
+    CHECK(d.action == BA::None);
+    CHECK_EQ(d.unbindJs, ApexBinder::kNone);
+    CHECK(d.why.find("엔진 영향 없음") != std::string::npos);
+    CHECK_EQ(b.boundJs(), kApexJs);
+    CHECK(b.onPadRemoved(999, 2001, -1).action == BA::None);  // unknown pad
+}
+
+// T6: exact APEX removed -> Unbind; added again -> BindExact and the arrival gate sends again
+TEST(b2b_bind, t06_apex_removed_then_readded) {
+    ApexBinder b;
+    b.onPadAdded(kBuiltinJs, 1, kBuiltinVid, kBuiltinPid, 0, -1, true);
+    b.onPadAdded(kApexJs, 0, kApexV, kApexP, 1, 1, true);
+    ArrivalGate g;
+    CHECK(!g.setLive());
+    CHECK(g.onApexAdded() == ArrivalGate::Action::SendNow);
+    const auto d = b.onPadRemoved(kApexJs, 5000, -1);
+    CHECK(d.action == BA::Unbind);
+    CHECK_EQ(d.unbindJs, kApexJs);
+    CHECK_EQ(d.unbindIndex, 0);
+    CHECK_EQ(d.checkAtMs, -1LL);  // the built-in pad left over is never presumed (37d7/2502 seen this session)
+    CHECK_EQ(b.boundJs(), ApexBinder::kNone);
+    g.onApexRemoved();
+    const auto again = b.onPadAdded(kApexJs + 10, 0, kApexV, kApexP, 8000, 1, true);
+    CHECK(again.action == BA::BindExact);
+    CHECK(g.onApexAdded() == ArrivalGate::Action::SendNow);
+    // without any exact pad seen: removing the bound presumed pad re-checks the remaining candidates later
+    ApexBinder p;
+    p.onPadAdded(1, 0, kBuiltinVid, kBuiltinPid, 0, -1, false);
+    CHECK(p.onCheck(1000, 1, false).action == BA::BindPresumed);
+    const auto u = p.onPadRemoved(1, 3000, -1);
+    CHECK(u.action == BA::Unbind);
+    CHECK_EQ(u.checkAtMs, -1LL);  // no candidate left
+    // bound pad removed while another 37d7/2502 pad is open and one IF2 -> re-bind at once
+    ApexBinder q;
+    q.onPadAdded(1, 0, kApexV, kApexP, 0, 1, true);
+    q.onPadAdded(2, 1, kApexV, kApexP, 1, 1, true);  // second exact pad: not bound
+    CHECK(q.removalNeedsIf2(1));
+    const auto r = q.onPadRemoved(1, 10, 1);
+    CHECK(r.action == BA::UnbindThenBindExact);
+    CHECK_EQ(r.bindJs, 2);
+    CHECK_EQ(r.bindIndex, 1);
+    CHECK(q.onPadRemoved(2, 11, -1).action == BA::Unbind);
+}
+
+// T7: the candidate disappears within 1000 ms -> the check binds nothing
+TEST(b2b_bind, t07_candidate_removed_before_check) {
+    ApexBinder b;
+    CHECK_EQ(b.onPadAdded(kBuiltinJs, 0, kBuiltinVid, kBuiltinPid, 0, -1, false).checkAtMs, 1000LL);
+    CHECK(b.onPadRemoved(kBuiltinJs, 500, -1).action == BA::None);
+    CHECK(!b.checkNeedsIf2());
+    const auto d = b.onCheck(1000, 1, false);
+    CHECK(d.action == BA::None);
+    CHECK(d.why.find("후보 없음") != std::string::npos);
+    // stale generation after a session end
+    const int gen = b.generation();
+    b.reset();
+    CHECK(b.generation() != gen);
+    CHECK_EQ(b.padCount(), static_cast<size_t>(0));
+    CHECK(b.onCheck(2000, 1, false).action == BA::None);
+}
+
+// T8: two 045e/028e pads + one IF2 -> never presumed
+TEST(b2b_bind, t08_two_fallback_pads_refused) {
+    ApexBinder b;
+    b.onPadAdded(1, 0, kBuiltinVid, kBuiltinPid, 0, -1, false);
+    b.onPadAdded(2, 1, kBuiltinVid, kBuiltinPid, 10, -1, false);
+    CHECK(!b.checkNeedsIf2());
+    const auto d = b.onCheck(1000, 1, false);
+    CHECK(d.action == BA::None);
+    CHECK(d.why.find("패드 2개") != std::string::npos);
+    CHECK_EQ(b.boundJs(), ApexBinder::kNone);
+}
+
+// T9: IF2 0 or 2 -> nothing is ever bound
+TEST(b2b_bind, t09_if2_zero_or_two) {
+    for (int if2 : {0, 2}) {
+        ApexBinder b;
+        const auto e = b.onPadAdded(kApexJs, 0, kApexV, kApexP, 0, if2, true);
+        CHECK(e.action == BA::None);
+        CHECK(e.why.find("IF2") != std::string::npos);
+        ApexBinder f;
+        f.onPadAdded(kBuiltinJs, 0, kBuiltinVid, kBuiltinPid, 0, -1, false);
+        CHECK(f.onCheck(1000, if2, false).action == BA::None);
+        CHECK_EQ(f.boundJs(), ApexBinder::kNone);
+    }
+    // other VID/PIDs never enter the binder logic as candidates
+    ApexBinder o;
+    const auto d = o.onPadAdded(kOtherJs, 0, 0x054C, 0x0CE6, 0, -1, false);
+    CHECK(d.action == BA::None);
+    CHECK_EQ(d.checkAtMs, -1LL);
+}
+
+// T10: SDL3 XInput trigger round trip: IF0-style byte b -> SDL axis -> triggerAxisTo255 == b (Android unit)
+TEST(b2b_trigger, t10_sdl_axis_round_trip_256) {
+    int same = 0;
+    for (int b = 0; b <= 255; b++) {
+        // SDL_xinputjoystick.c: axis = b*257 - 32768; SDL_gamepad.c trigger = (axis - min) / (max - min) * 32767 (float, truncated)
+        const int sdl = static_cast<int>(static_cast<float>(b * 257) / 65535.0f * 32767.0f);
+        if (triggerAxisTo255(sdl) == b) same++;
+        else mt::report().push_back(arbs::jc::fmt("t10 mismatch b=%d sdl=%d -> %d", b, sdl, triggerAxisTo255(sdl)));
+    }
+    CHECK_EQ(same, 256);
+    mt::report().push_back(arbs::jc::fmt("b2b t10: SDL axis round trip %d/256 equal", same));
+}
+
+// T11: Weapon zone 2..3 str 1 on R2 with the position fed from SDL axis values -> one break + trigger frames.
+// Without the feed (the field case: bound pad = untouched built-in pad, R2 = 0) -> 0 breaks, 0 trigger frames.
+namespace {
+struct WeaponRun {
+    int64_t breaks = 0;
+    int64_t trigFrames = 0;
+};
+WeaponRun runWeapon(bool feed) {
+    fake::FakeClock clock;
+    fake::CaptureLog log(&clock);
+    arbs::Engine eng(clock, log);
+    const int64_t t0 = clock.nowNs();
+    auto port = std::make_unique<fake::FakePort>(clock);
+    eng.attach(std::move(port), arbs::Engine::StartMode::Inline);
+    eng.setControllerNumber(0);
+    eng.onSessionStart(arbs::Engine::Config());
+    eng.onInputSeen();
+    uint8_t weapon[10] = {0x0C, 0x00, 0x00};  // zones 2,3; strength (0 & 7) + 1 = 1
+    const uint8_t zero[10] = {0};
+    clock.at(t0 + 300 * fake::MS, [&] { eng.onTriggerEffects(0, 0x04, 0x00, 0x25, zero, weapon); });
+    if (feed) {
+        // R2 pulled 0 -> full over 120 ms, held, released: same path as ArbsBridge::onApexTriggerAxis
+        for (int k = 0; k <= 15; k++) {
+            const int v = 32767 * k / 15;
+            clock.at(t0 + (400 + 8 * k) * fake::MS, [&eng, v] { eng.onTriggerPosition(0, triggerAxisTo255(v)); });
+        }
+        for (int k = 0; k <= 15; k++) {
+            const int v = 32767 - 32767 * k / 15;
+            clock.at(t0 + (800 + 8 * k) * fake::MS, [&eng, v] { eng.onTriggerPosition(0, triggerAxisTo255(v)); });
+        }
+    }
+    clock.setLimit(t0 + 1500 * fake::MS, [&] { eng.requestTerminate("test end"); });
+    eng.runLoop();
+    WeaponRun r;
+    const auto st = eng.trig().stats();
+    r.breaks = st[8];
+    r.trigFrames = st[11] + st[12] + st[13] + st[14];
+    return r;
+}
+}  // namespace
+
+TEST(b2b_trigger, t11_weapon_break_needs_fed_position) {
+    const WeaponRun fed = runWeapon(true);
+    const WeaponRun none = runWeapon(false);
+    CHECK_EQ(fed.breaks, 1LL);
+    CHECK(fed.trigFrames > 0);
+    CHECK_EQ(none.breaks, 0LL);
+    CHECK_EQ(none.trigFrames, 0LL);
+    mt::report().push_back(arbs::jc::fmt("b2b t11: fed weapon breaks %lld trigger frames %lld; not fed %lld / %lld",
+                                         static_cast<long long>(fed.breaks), static_cast<long long>(fed.trigFrames),
+                                         static_cast<long long>(none.breaks), static_cast<long long>(none.trigFrames)));
+}
+
+// T12: slot plan table (multi/single x on/off x occupancy)
+TEST(b2b_number, t12_slot_plan_table) {
+    bool none[16] = {};
+    bool s0[16] = {};
+    s0[0] = true;
+    bool s01[16] = {};
+    s01[0] = s01[1] = true;
+    bool full[16];
+    for (bool& b : full) b = true;
+    bool all_but_0[16];
+    for (bool& b : all_but_0) b = true;
+    all_but_0[0] = false;
+    // on, multi
+    CHECK_EQ(planSlot(none, 16, true, true, false, true, true).slot, 0);
+    CHECK_EQ(planSlot(none, 16, true, true, false, false, true).slot, 1);  // 0 kept for the APEX
+    CHECK_EQ(planSlot(none, 16, true, true, false, false, false).slot, 0);  // no APEX anywhere: upstream
+    SlotPlan p = planSlot(s0, 16, true, true, false, true, true);
+    CHECK_EQ(p.slot, 0);
+    CHECK_EQ(p.moveTo, 1);
+    p = planSlot(s01, 16, true, true, false, true, true);
+    CHECK_EQ(p.slot, 0);
+    CHECK_EQ(p.moveTo, 2);
+    p = planSlot(s0, 16, true, true, true, true, true);  // slot 0 already holds a 37d7/2502 pad
+    CHECK_EQ(p.slot, 1);
+    CHECK_EQ(p.moveTo, -1);
+    CHECK_EQ(planSlot(full, 16, true, true, false, true, true).slot, -1);
+    CHECK_EQ(planSlot(all_but_0, 16, true, true, false, false, true).slot, 0);  // only 0 left
+    // off, multi = upstream
+    CHECK_EQ(planSlot(none, 16, true, false, false, false, true).slot, 0);
+    p = planSlot(s0, 16, true, false, false, true, true);
+    CHECK_EQ(p.slot, 1);
+    CHECK_EQ(p.moveTo, -1);
+    // single (on or off): upstream slots, numbering is always 0
+    p = planSlot(s0, 16, false, true, false, true, true);
+    CHECK_EQ(p.slot, 1);
+    CHECK_EQ(p.moveTo, -1);
+    CHECK_EQ(planSlot(none, 16, false, true, false, false, true).slot, 0);
+    // single-mode arrival skip
+    CHECK(skipArrivalSingle(false, true, false, false, true, false));
+    CHECK(skipArrivalSingle(false, true, false, false, false, true));
+    CHECK(!skipArrivalSingle(false, true, false, false, false, false));  // no APEX: upstream
+    CHECK(!skipArrivalSingle(false, true, true, false, true, true));     // the 37d7/2502 pad itself
+    CHECK(!skipArrivalSingle(false, true, false, true, true, true));     // the bound APEX (presumed)
+    CHECK(!skipArrivalSingle(false, false, false, false, true, true));   // setting off
+    CHECK(!skipArrivalSingle(true, true, false, false, true, true));     // multi mode
+    // ledger: an arrival for an allocated number is ignored, removal frees it
+    HostLedger l;
+    l.sent(HostStep{HostStep::Kind::Arrival, 0, 1, false}, 7);
+    l.sent(HostStep{HostStep::Kind::Arrival, 0, 1, true}, 8);
+    CHECK(l.role(0) == HostRole::Normal);
+    CHECK_EQ(l.creator(0), 7);
+    // single mode: APEX arrival on a normal 0 -> removal (mask 0) first when the setting is on or the same pad made 0
+    std::vector<HostStep> v = planArrival(l, false, true, 0, true, 8, 1);
+    CHECK_EQ(v.size(), static_cast<size_t>(2));
+    CHECK(v[0].kind == HostStep::Kind::Remove && v[0].mask == 0);
+    CHECK(v[1].apex && v[1].mask == 1);
+    CHECK_EQ(planArrival(l, false, false, 0, true, 8, 1).size(), static_cast<size_t>(1));  // off, other pad: no removal
+    CHECK_EQ(planArrival(l, false, false, 0, true, 7, 1).size(), static_cast<size_t>(2));  // off, same pad (K8)
+    l.removed(0);
+    CHECK(l.role(0) == HostRole::None);
+    CHECK_EQ(planUnbind(l, true, 0, 3).size(), static_cast<size_t>(0));
+    CHECK_EQ(planUnbind(l, false, 0, 1).size(), static_cast<size_t>(0));
+}
+
+// T13: Moonlight RTT samples reach the session summary (was "n/a": nothing called onMoonlightRtt on Windows)
+TEST(b2b_rtt, t13_session_summary_has_rtt) {
+    for (bool feed : {true, false}) {
+        fake::FakeClock clock;
+        fake::CaptureLog log(&clock);
+        arbs::Engine eng(clock, log);
+        const int64_t t0 = clock.nowNs();
+        eng.attach(std::make_unique<fake::FakePort>(clock), arbs::Engine::StartMode::Inline);
+        eng.setControllerNumber(0);
+        eng.onSessionStart(arbs::Engine::Config());
+        eng.onInputSeen();
+        if (feed) {
+            for (int k = 1; k <= 3; k++) clock.at(t0 + k * 100 * fake::MS, [&eng] { eng.onMoonlightRtt(20); });
+            clock.at(t0 + 400 * fake::MS, [&eng] { eng.onMoonlightRtt(0); });  // ignored (ms > 0 only)
+        }
+        clock.at(t0 + 1000 * fake::MS, [&eng] { eng.onSessionEndBegin("테스트"); });
+        clock.at(t0 + 1100 * fake::MS, [&eng] { eng.onSessionEndFinish("테스트"); });
+        clock.setLimit(t0 + 1500 * fake::MS, [&] { eng.requestTerminate("test end"); });
+        eng.runLoop();
+        const std::string sum = log.find("ARBS 세션 요약");
+        CHECK_MSG(sum.find(feed ? "Moonlight RTT 평균 20ms" : "Moonlight RTT 평균 n/a") != std::string::npos, sum);
+    }
 }
 
 int main(int argc, char** argv) {

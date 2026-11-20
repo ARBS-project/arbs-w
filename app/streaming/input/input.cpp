@@ -154,6 +154,15 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     m_SpecialKeyCombos[KeyComboArbsReconnectApex].enabled = false;
 #endif
 
+#ifdef ARBS_W
+    // B2b 2-2: APEX first numbering (setting, default on). Multi-controller mode: APEX = 0, other pads after it.
+    // Single mode ("Force gamepad #1 always connected"): other pads' arrival reports are skipped while an APEX exists.
+    m_ArbsApexFirst = prefs.arbsApexFirst;
+    ArbsBridge::log(m_ArbsApexFirst ? (m_MultiController ? "ARBS-W: APEX 우선 번호 켬(멀티 컨트롤러: APEX = 0번, 다른 패드는 1번부터)"
+                                                         : "ARBS-W: APEX 우선 번호 켬(단일 컨트롤러 모드: 모두 0번, APEX 가 아닌 패드의 도착 보고 생략)")
+                                    : "ARBS-W: APEX 우선 번호 끔(번호·도착 순서는 Moonlight 기본)");
+#endif
+
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);
     m_OldIgnoreDevicesExcept = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES_EXCEPT);
 

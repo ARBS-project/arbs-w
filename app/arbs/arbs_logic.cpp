@@ -76,6 +76,309 @@ bool needsIf2Lookup(uint16_t sdlVid, uint16_t sdlPid) {
     return (sdlVid == kApexVid && sdlPid == kApexDonglePid) || (sdlVid == kXInputFallbackVid && sdlPid == kXInputFallbackPid);
 }
 
+bool isExactVidPid(uint16_t sdlVid, uint16_t sdlPid) { return sdlVid == kApexVid && sdlPid == kApexDonglePid; }
+
+bool isFallbackVidPid(uint16_t sdlVid, uint16_t sdlPid) { return sdlVid == kXInputFallbackVid && sdlPid == kXInputFallbackPid; }
+
+// ------------------------------------------------------------------------------------------------ ApexBinder (B2b 2-1)
+const char* ApexBinder::actionName(Action a) {
+    switch (a) {
+    case Action::BindExact:
+        return "BindExact";
+    case Action::BindPresumed:
+        return "BindPresumed";
+    case Action::Rebind:
+        return "Rebind";
+    case Action::Unbind:
+        return "Unbind";
+    case Action::UnbindThenBindExact:
+        return "UnbindThenBindExact";
+    default:
+        return "None";
+    }
+}
+
+int ApexBinder::indexOf(int js) const {
+    for (const Pad& p : pads_)
+        if (p.js == js) return p.index;
+    return -1;
+}
+
+int ApexBinder::openCount(bool exact) const {
+    int n = 0;
+    for (const Pad& p : pads_) {
+        if (exact ? isExactVidPid(p.vid, p.pid) : isFallbackVidPid(p.vid, p.pid)) n++;
+    }
+    return n;
+}
+
+int64_t ApexBinder::scheduleCheck(int64_t atMs) {
+    if (checkPending_) {
+        // A timer is already running: it fires early and onCheck() reschedules to the later time.
+        if (atMs > checkAtMs_) checkAtMs_ = atMs;
+        return -1;
+    }
+    checkPending_ = true;
+    checkAtMs_ = atMs;
+    return atMs;
+}
+
+ApexBinder::Decision ApexBinder::onPadAdded(int js, int index, uint16_t vid, uint16_t pid, int64_t nowMs, int if2Count,
+                                            bool sdlListHasExact) {
+    Decision d;
+    pads_.erase(std::remove_if(pads_.begin(), pads_.end(), [js](const Pad& p) { return p.js == js; }), pads_.end());
+    pads_.push_back(Pad{js, index, vid, pid});
+    if (firstAddMs_ < 0) firstAddMs_ = nowMs;
+    if (sdlListHasExact) exactSeen_ = true;
+    if (isExactVidPid(vid, pid)) {
+        exactSeen_ = true;
+        if (identifyApex(vid, pid, if2Count, 0) != ApexMatch::Exact) {
+            d.why = arbs::jc::fmt("VID/PID 일치지만 IF2 %d개 - 일반 패드(동글 IF2 가 정확히 1개일 때만 APEX)", if2Count);
+            return d;
+        }
+        if (boundJs_ == kNone) {
+            d.action = Action::BindExact;
+            d.why = "APEX(VID/PID 일치) - 바로 연결";
+        } else if (boundKind_ == ApexMatch::Presumed) {
+            d.action = Action::Rebind;
+            d.unbindJs = boundJs_;
+            d.unbindIndex = indexOf(boundJs_);
+            d.why = "APEX(VID/PID 일치) - 추정 연결 패드에서 이 패드로 다시 묶기";
+        } else {
+            d.why = "APEX 가 이미 연결되어 있음 - 이 패드는 일반 패드로 처리";
+            return d;
+        }
+        d.bindJs = js;
+        d.bindIndex = index;
+        d.bindKind = ApexMatch::Exact;
+        boundJs_ = js;
+        boundKind_ = ApexMatch::Exact;
+        return d;
+    }
+    if (isFallbackVidPid(vid, pid)) {
+        if (exactSeen_) {
+            d.why = "이 세션에서 SDL 이 VID/PID 37d7/2502 장치를 보여 줌 - XInput 대체 VID/PID 추정 매칭 안 함(일반 패드)";
+        } else if (boundJs_ != kNone) {
+            d.why = "APEX 가 이미 연결되어 있음 - 이 패드는 일반 패드로 처리";
+        } else {
+            d.checkAtMs = scheduleCheck(std::max(firstAddMs_ + kPresumeDelayMs, nowMs));
+            d.why = "추정 후보(XInput 대체 VID/PID) - 첫 패드 도착 1000ms 뒤 확인(VID/PID 일치 패드가 없을 때만 연결)";
+        }
+        return d;
+    }
+    d.why = "일반 패드";
+    return d;
+}
+
+ApexBinder::Decision ApexBinder::onPadRemoved(int js, int64_t nowMs, int if2Count) {
+    Decision d;
+    auto it = std::find_if(pads_.begin(), pads_.end(), [js](const Pad& p) { return p.js == js; });
+    if (it == pads_.end()) {
+        d.why = "목록에 없는 패드 제거 - 무시";
+        return d;
+    }
+    const int removedIndex = it->index;
+    pads_.erase(it);
+    if (js != boundJs_) {
+        d.why = "APEX 가 아닌 패드 제거 - 엔진 영향 없음";
+        return d;
+    }
+    d.unbindJs = js;
+    d.unbindIndex = removedIndex;
+    boundJs_ = kNone;
+    boundKind_ = ApexMatch::None;
+    for (const Pad& p : pads_) {
+        if (!isExactVidPid(p.vid, p.pid)) continue;
+        if (if2Count != 1) {
+            d.why = arbs::jc::fmt("APEX 패드 제거 - 남은 VID/PID 일치 패드는 IF2 %d개라 연결 안 함", if2Count);
+            break;
+        }
+        d.action = Action::UnbindThenBindExact;
+        d.bindJs = p.js;
+        d.bindIndex = p.index;
+        d.bindKind = ApexMatch::Exact;
+        boundJs_ = p.js;
+        boundKind_ = ApexMatch::Exact;
+        d.why = "APEX 패드 제거 - 남은 VID/PID 일치 패드로 다시 연결";
+        return d;
+    }
+    d.action = Action::Unbind;
+    if (d.why.empty()) d.why = "APEX 패드 제거 - 엔진 분리";
+    if (!exactSeen_ && openCount(false) > 0) {
+        d.checkAtMs = scheduleCheck(std::max(firstAddMs_ + kPresumeDelayMs, nowMs + kPresumeDelayMs));
+        d.why += " (추정 후보는 1000ms 뒤 다시 확인)";
+    }
+    return d;
+}
+
+ApexBinder::Decision ApexBinder::onCheck(int64_t nowMs, int if2Count, bool sdlListHasExact) {
+    Decision d;
+    if (!checkPending_) {
+        d.why = "확인 예약 없음 - 무시";
+        return d;
+    }
+    if (nowMs < checkAtMs_) {
+        d.checkAtMs = checkAtMs_;  // still pending
+        d.why = "확인 시각 전 - 다시 예약";
+        return d;
+    }
+    checkPending_ = false;
+    if (sdlListHasExact) exactSeen_ = true;
+    if (boundJs_ != kNone) {
+        d.why = "APEX 가 이미 연결되어 있음 - 추정 확인 생략";
+        return d;
+    }
+    if (exactSeen_) {
+        d.why = "SDL 장치 목록에 VID/PID 37d7/2502 가 있음(또는 이 세션에서 보였음) - 추정 매칭 안 함";
+        return d;
+    }
+    const int nFallback = openCount(false);
+    const Pad* cand = nullptr;
+    for (const Pad& p : pads_)
+        if (isFallbackVidPid(p.vid, p.pid)) cand = &p;
+    if (cand == nullptr) {
+        d.why = "추정 후보 없음(제거됨)";
+        return d;
+    }
+    if (identifyApex(cand->vid, cand->pid, if2Count, nFallback) != ApexMatch::Presumed) {
+        d.why = arbs::jc::fmt("추정 조건 불충족(IF2 %d개, XInput 대체 VID/PID 패드 %d개) - 일반 패드", if2Count, nFallback);
+        return d;
+    }
+    d.action = Action::BindPresumed;
+    d.bindJs = cand->js;
+    d.bindIndex = cand->index;
+    d.bindKind = ApexMatch::Presumed;
+    boundJs_ = cand->js;
+    boundKind_ = ApexMatch::Presumed;
+    d.why = "APEX(추정 매칭: XInput 대체 VID/PID, 동글 1개·패드 1개, 1000ms 동안 VID/PID 일치 패드 없음)";
+    return d;
+}
+
+void ApexBinder::onBindFailed(int js) {
+    if (boundJs_ != js) return;
+    boundJs_ = kNone;
+    boundKind_ = ApexMatch::None;
+}
+
+void ApexBinder::onIndexChanged(int js, int index) {
+    for (Pad& p : pads_)
+        if (p.js == js) p.index = index;
+}
+
+void ApexBinder::reset() {
+    pads_.clear();
+    boundJs_ = kNone;
+    boundKind_ = ApexMatch::None;
+    firstAddMs_ = -1;
+    checkAtMs_ = -1;
+    checkPending_ = false;
+    exactSeen_ = false;
+    gen_++;
+}
+
+bool ApexBinder::removalNeedsIf2(int js) const {
+    if (js != boundJs_) return false;
+    for (const Pad& p : pads_)
+        if (p.js != js && isExactVidPid(p.vid, p.pid)) return true;
+    return false;
+}
+
+bool ApexBinder::checkNeedsIf2() const { return boundJs_ == kNone && !exactSeen_ && openCount(false) == 1; }
+
+// ------------------------------------------------------------------------------------------------ numbering (B2b 2-2)
+void HostLedger::reset() {
+    for (int i = 0; i < kMax; i++) {
+        role_[i] = HostRole::None;
+        creator_[i] = 0;
+    }
+}
+
+HostRole HostLedger::role(int index) const { return index >= 0 && index < kMax ? role_[index] : HostRole::None; }
+
+int HostLedger::creator(int index) const { return index >= 0 && index < kMax ? creator_[index] : 0; }
+
+void HostLedger::sent(const HostStep& s, int joystickId) {
+    if (s.index < 0 || s.index >= kMax) return;
+    if (s.kind == HostStep::Kind::Remove) {
+        role_[s.index] = HostRole::None;
+        return;
+    }
+    if (role_[s.index] == HostRole::None) {  // an arrival for an allocated number is ignored by the host
+        role_[s.index] = s.apex ? HostRole::Apex : HostRole::Normal;
+        creator_[s.index] = joystickId;
+    }
+}
+
+void HostLedger::removed(int index) {
+    if (index >= 0 && index < kMax) role_[index] = HostRole::None;
+}
+
+SlotPlan planSlot(const bool* occupied, int n, bool multi, bool apexFirst, bool slot0IsExact, bool padIsExact,
+                  bool exactInSdlList) {
+    auto firstFree = [&](int from) {
+        for (int i = from; i < n; i++)
+            if (!occupied[i]) return i;
+        return -1;
+    };
+    SlotPlan p;
+    if (n <= 0) return p;
+    if (!multi || !apexFirst) {
+        p.slot = firstFree(0);
+        return p;
+    }
+    if (padIsExact) {
+        if (!occupied[0]) {
+            p.slot = 0;
+        } else if (slot0IsExact) {
+            p.slot = firstFree(0);
+        } else {
+            const int k = firstFree(1);
+            if (k >= 0) {
+                p.slot = 0;
+                p.moveTo = k;
+            }
+        }
+        return p;
+    }
+    if (exactInSdlList) {
+        const int k = firstFree(1);
+        p.slot = k >= 0 ? k : firstFree(0);
+        return p;
+    }
+    p.slot = firstFree(0);
+    return p;
+}
+
+bool skipArrivalSingle(bool multi, bool apexFirst, bool padIsExact, bool padIsApex, bool apexBound, bool exactInSdlList) {
+    return !multi && apexFirst && !padIsExact && !padIsApex && (apexBound || exactInSdlList);
+}
+
+std::vector<HostStep> planArrival(const HostLedger& l, bool multi, bool apexFirst, int index, bool asApex, int joystickId,
+                                  uint16_t mask) {
+    std::vector<HostStep> v;
+    if (index < 0 || index >= HostLedger::kMax) return v;
+    if (multi) {
+        const uint16_t bit = static_cast<uint16_t>(1u << index);
+        if (l.role(index) != HostRole::None) v.push_back(HostStep{HostStep::Kind::Remove, index, static_cast<uint16_t>(mask & ~bit), false});
+        v.push_back(HostStep{HostStep::Kind::Arrival, index, static_cast<uint16_t>(mask | bit), asApex});
+        return v;
+    }
+    if (asApex && l.role(0) == HostRole::Normal && (apexFirst || l.creator(0) == joystickId)) {
+        v.push_back(HostStep{HostStep::Kind::Remove, 0, 0, false});
+    }
+    v.push_back(HostStep{HostStep::Kind::Arrival, 0, mask, asApex});
+    return v;
+}
+
+std::vector<HostStep> planUnbind(const HostLedger& l, bool multi, int index, uint16_t mask) {
+    std::vector<HostStep> v;
+    if (!multi || index < 0 || index >= HostLedger::kMax || l.role(index) != HostRole::Apex) return v;
+    const uint16_t bit = static_cast<uint16_t>(1u << index);
+    v.push_back(HostStep{HostStep::Kind::Remove, index, static_cast<uint16_t>(mask & ~bit), false});
+    v.push_back(HostStep{HostStep::Kind::Arrival, index, static_cast<uint16_t>(mask | bit), false});
+    return v;
+}
+
 bool outputLenUsable(uint16_t outLen) { return outLen >= kWireSize; }
 
 size_t buildOutputReport(const uint8_t* frame32, uint16_t outLen, uint8_t* dst, size_t dstCap) {

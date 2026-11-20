@@ -19,6 +19,7 @@ struct ArbsSettings {
     bool trigger = true;        // trigger haptics. checkbox_arbs_trigger
     int triggerStrength = 100;  // %. list_arbs_trigger_strength
     bool verbose = false;       // keep 1 s lines after 20 MB. checkbox_arbs_verbose_log
+    bool apexFirst = true;      // B2b 2-2: APEX = controller #1 (number 0), other pads after it. checkbox_arbs_apex_first
 };
 
 namespace settings {

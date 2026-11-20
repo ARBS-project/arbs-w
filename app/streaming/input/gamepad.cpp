@@ -8,7 +8,9 @@
 #include <QtMath>
 
 #ifdef ARBS_W
+#include <cstdio>
 #include "arbs/arbs_bridge.h"
+#include "arbs/arbs_numbering.h"
 #endif
 
 // How long the Start button must be pressed to toggle mouse emulation
@@ -520,6 +522,12 @@ void SdlInputHandler::handleJoystickBatteryEvent(SDL_JoyBatteryEvent* event)
     if (state == NULL) {
         return;
     }
+#ifdef ARBS_W
+    if (state->arbsArrivalSkipped) {
+        // Single mode + APEX first: this pad is not reported, its battery must not replace the APEX one on number 0
+        return;
+    }
+#endif
 
     sendGamepadBatteryState(state, event->level);
 }
@@ -575,6 +583,27 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             }
         }
 
+#ifdef ARBS_W
+        // ARBS-W B2b 2-2: APEX first numbering. VID/PID are read before the slot choice. Multi-controller mode + setting
+        // on: a 37d7/2502 pad takes slot 0 (the pad in 0 moves to the first free slot), other pads start at 1 while a
+        // 37d7/2502 device is in the SDL list. Setting off or single mode: the upstream choice above.
+        const bool arbsPadExact = ArbsBridge::isExactPad(SDL_GameControllerGetVendor(controller), SDL_GameControllerGetProduct(controller));
+        int arbsMoveTo = -1;
+        {
+            bool occupied[MAX_GAMEPADS];
+            for (int j = 0; j < MAX_GAMEPADS; j++) {
+                occupied[j] = m_GamepadState[j].controller != NULL;
+            }
+            const bool slot0Exact = occupied[0] &&
+                    ArbsBridge::isExactPad(SDL_GameControllerGetVendor(m_GamepadState[0].controller),
+                                           SDL_GameControllerGetProduct(m_GamepadState[0].controller));
+            const arbsw::SlotPlan plan = arbsw::planSlot(occupied, MAX_GAMEPADS, m_MultiController, m_ArbsApexFirst, slot0Exact,
+                                                         arbsPadExact, ArbsBridge::sdlListHasExact());
+            i = plan.slot >= 0 ? plan.slot : MAX_GAMEPADS;
+            arbsMoveTo = plan.moveTo;
+        }
+#endif
+
         if (i == MAX_GAMEPADS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "No open gamepad slots found!");
@@ -592,6 +621,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             SDL_GameControllerClose(controller);
             return;
         }
+
+#ifdef ARBS_W
+        if (arbsMoveTo >= 0) {
+            // The APEX arrived after another pad took slot 0: that pad moves (its host report is sent below, before ours)
+            arbsMovePad(0, arbsMoveTo);
+        }
+#endif
 
         state = &m_GamepadState[i];
         if (m_MultiController) {
@@ -673,9 +709,12 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         }
 
 #ifdef ARBS_W
-        // ARBS-W: APEX 2.4G dongle? (SDL VID/PID 37D7/2502, or XInput fallback 045E/028E with exactly one dongle and
-        // one such pad) -> IF2 opened, ARBS Core attached; reported to the host as a PS controller with PCM haptics.
-        const bool arbsApex = ArbsBridge::onGamepadAdded(state->index, state->jsId, vendorId, productId);
+        // ARBS-W: APEX 2.4G dongle? B2b 2-1: SDL VID/PID 37D7/2502 + one IF2 binds at once (and replaces a presumed
+        // binding); the XInput fallback 045E/028E is only checked 1000 ms after the first pad, when no 37D7/2502 device
+        // is in the SDL list. Bound -> IF2 opened, ARBS Core attached, reported as a PS controller with PCM haptics.
+        const ArbsBind arbsBind = ArbsBridge::onGamepadAdded(state->index, state->jsId, vendorId, productId);
+        const bool arbsApex = arbsBind.boundJs == state->jsId;
+        bool arbsSent = true;
 #endif
 
         // Add this gamepad to the gamepad mask
@@ -782,6 +821,10 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         }
 
 #ifdef ARBS_W
+        // The pad's own arrival info, for re-reports (re-bind / slot move)
+        state->arbsType = type;
+        state->arbsButtons = supportedButtonFlags;
+        state->arbsCaps = capabilities;
         if (arbsApex) {
             // DualSense-style report: PS type + analog triggers + rumble + PCM haptics (0x8000), no trigger rumble
             type = ArbsBridge::apexType();
@@ -798,13 +841,21 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             type == LI_CTYPE_PS;
 
 #ifdef ARBS_W
-        if (arbsApex) {
-            // Only while the stream is live, once per attach; rc goes to the ARBS log
-            ArbsBridge::sendApexArrival(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
+        // Host report order (B2b analysis 2-2 channel rule): the moved pad first (its new number, mask still holds 0),
+        // then the pad that lost the APEX binding, then this pad (removal MC first if its number was already allocated).
+        // The APEX arrival goes through the stream-live gate (once per attach); rc goes to the ARBS log.
+        if (arbsMoveTo >= 0) {
+            arbsSendArrival(&m_GamepadState[arbsMoveTo], ArbsBridge::isApexJoystick(m_GamepadState[arbsMoveTo].jsId));
         }
-        else
-#endif
+        if (arbsBind.unboundJs != ArbsBind::kNone) {
+            ArbsBind lost;
+            lost.unboundJs = arbsBind.unboundJs;
+            arbsApplyBind(lost);
+        }
+        arbsSent = arbsSendArrival(state, arbsApex);
+#else
         LiSendControllerArrivalEvent(state->index, m_GamepadMask, type, supportedButtonFlags, capabilities);
+#endif
 #else
 
         // Send an empty event to tell the PC we've arrived
@@ -812,7 +863,11 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
 
         // Send a power level if it's known at this time
+#ifdef ARBS_W
+        if (powerLevel != SDL_JOYSTICK_POWER_UNKNOWN && arbsSent) {
+#else
         if (powerLevel != SDL_JOYSTICK_POWER_UNKNOWN) {
+#endif
             sendGamepadBatteryState(state, powerLevel);
         }
     }
@@ -833,8 +888,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
 #endif
 
 #ifdef ARBS_W
-            // APEX removed: stop sequence (if active) and close IF2
-            ArbsBridge::onGamepadRemoved(state->jsId);
+            // B2b 2-4: only the bound APEX detaches the engine (stop sequence, IF2 closed); a remaining 37D7/2502 pad
+            // is bound at once (reported after this removal)
+            const ArbsBind arbsBind = ArbsBridge::onGamepadRemoved(state->jsId);
 #endif
 
             // Remove this from the gamepad mask in MC-mode
@@ -853,12 +909,130 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             // Send a final event to let the PC know this gamepad is gone
             LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                        0, 0, 0, 0, 0, 0, 0);
+#ifdef ARBS_W
+            if (m_MultiController) {
+                m_ArbsHost.removed(state->index);
+            }
+#endif
 
             // Clear all remaining state from this slot
             SDL_memset(state, 0, sizeof(*state));
+#ifdef ARBS_W
+            arbsApplyBind(arbsBind);
+#endif
         }
     }
 }
+
+#ifdef ARBS_W
+// ------------------------------------------------------------------------------------------------ ARBS-W B2b
+static bool arbsClickpadEmulation(GamepadState* state, bool psType)
+{
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    return psType &&
+           SDL_GameControllerGetBindForButton(state->controller, SDL_CONTROLLER_BUTTON_TOUCHPAD).bindType == SDL_CONTROLLER_BINDTYPE_NONE;
+#else
+    return psType;
+#endif
+}
+
+void SdlInputHandler::arbsHandleApexCheck(int generation)
+{
+    arbsApplyBind(ArbsBridge::onApexCheck(generation));
+}
+
+void SdlInputHandler::arbsApplyBind(const ArbsBind& bind)
+{
+    if (bind.unboundJs != ArbsBind::kNone) {
+        GamepadState* lost = findStateForGamepad(bind.unboundJs);
+        if (lost != nullptr) {
+            // Multi-controller mode: its number held the APEX (PS/PCM) arrival -> removal MC + its own arrival again.
+            // Single mode: nothing (number 0 stays PS/PCM for the new APEX).
+            arbsRunSteps(arbsw::planUnbind(m_ArbsHost, m_MultiController, lost->index, (uint16_t)m_GamepadMask), lost);
+            lost->clickpadButtonEmulationEnabled = arbsClickpadEmulation(lost, lost->arbsType == LI_CTYPE_PS);
+        }
+    }
+    if (bind.boundJs != ArbsBind::kNone) {
+        GamepadState* apex = findStateForGamepad(bind.boundJs);
+        if (apex != nullptr) {
+            // Already reported as a normal pad (delayed presumed match / re-bind after removal): report it as the APEX.
+            arbsSendArrival(apex, true);
+            apex->clickpadButtonEmulationEnabled = arbsClickpadEmulation(apex, true);
+        }
+    }
+}
+
+bool SdlInputHandler::arbsSendArrival(GamepadState* state, bool asApex)
+{
+    const uint16_t vid = SDL_GameControllerGetVendor(state->controller);
+    const uint16_t pid = SDL_GameControllerGetProduct(state->controller);
+    if (arbsw::skipArrivalSingle(m_MultiController, m_ArbsApexFirst, ArbsBridge::isExactPad(vid, pid), asApex,
+                                 ArbsBridge::apexBound(), ArbsBridge::sdlListHasExact())) {
+        // Risk K1: the host keeps the first arrival of number 0, so it must be the APEX (PS/PCM) one.
+        state->arbsArrivalSkipped = true;
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "ARBS-W: APEX 우선(단일 컨트롤러 모드): APEX 가 아닌 패드 VID/PID %04x/%04x 의 도착 보고 생략 - 0번은 APEX 도착이 만듦, 입력은 0번에 합쳐짐",
+                      vid, pid);
+        ArbsBridge::log(line);
+        return false;
+    }
+    state->arbsArrivalSkipped = false;
+    arbsRunSteps(arbsw::planArrival(m_ArbsHost, m_MultiController, m_ArbsApexFirst, state->index, asApex, state->jsId,
+                                    (uint16_t)m_GamepadMask),
+                 state);
+    return true;
+}
+
+void SdlInputHandler::arbsRunSteps(const std::vector<arbsw::HostStep>& steps, GamepadState* state)
+{
+    char line[256];
+    for (const arbsw::HostStep& s : steps) {
+        if (s.kind == arbsw::HostStep::Kind::Remove) {
+            LiSendMultiControllerEvent(s.index, s.mask, 0, 0, 0, 0, 0, 0, 0);
+            std::snprintf(line, sizeof(line), "ARBS-W: 호스트 보고 - 번호 %d 제거(MC 마스크 0x%x) 후 다시 도착 보고", s.index, s.mask);
+            ArbsBridge::log(line);
+        }
+        else if (s.apex) {
+            if (!m_MultiController && m_ArbsHost.role(0) == arbsw::HostRole::Normal) {
+                ArbsBridge::log("ARBS-W 경고: 0번이 이미 일반 패드 도착으로 만들어져 있음(APEX 우선 끔) - 호스트가 APEX(PS·PCM) 도착을 무시할 수 있음");
+            }
+            ArbsBridge::sendApexArrival(s.index, s.mask, ArbsBridge::apexType(), state->arbsButtons, ArbsBridge::apexCaps(state->arbsCaps));
+        }
+        else {
+            const int rc = LiSendControllerArrivalEvent(s.index, s.mask, state->arbsType, state->arbsButtons, state->arbsCaps);
+            std::snprintf(line, sizeof(line), "ARBS-W: 일반 패드 도착 보고 번호 %d 타입 %u caps 0x%x 마스크 0x%x rc=%d", s.index,
+                          (unsigned)state->arbsType, (unsigned)state->arbsCaps, s.mask, rc);
+            ArbsBridge::log(line);
+        }
+        m_ArbsHost.sent(s, state->jsId);
+    }
+}
+
+void SdlInputHandler::arbsMovePad(int from, int to)
+{
+    GamepadState* x = &m_GamepadState[from];
+    // Risk K3: the mouse emulation timer holds a pointer to this slot -> stop it before the slot moves
+    if (x->mouseEmulationTimer != 0) {
+        SDL_RemoveTimer(x->mouseEmulationTimer);
+        x->mouseEmulationTimer = 0;
+        Session::get()->notifyMouseEmulationMode(false);
+    }
+    // Risk K4: multi-controller invariant m_GamepadState[i].index == i
+    m_GamepadState[to] = *x;
+    m_GamepadState[to].index = to;
+#if SDL_VERSION_ATLEAST(2, 0, 12)
+    SDL_GameControllerSetPlayerIndex(m_GamepadState[to].controller, to);
+#endif
+    SDL_memset(x, 0, sizeof(*x));
+    // Bit [from] stays set (the APEX takes that number); the moved pad's bit is added
+    m_GamepadMask |= (1 << to);
+    ArbsBridge::onGamepadIndexChanged(m_GamepadState[to].jsId, to);
+    char line[160];
+    std::snprintf(line, sizeof(line), "ARBS-W: APEX 우선 - %d번 패드를 %d번으로 옮김(APEX 가 %d번)", from, to, from);
+    ArbsBridge::log(line);
+}
+#endif
 
 void SdlInputHandler::handleJoystickArrivalEvent(SDL_JoyDeviceEvent* event)
 {

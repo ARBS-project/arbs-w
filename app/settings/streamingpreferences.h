@@ -171,6 +171,8 @@ public:
     Q_PROPERTY(bool arbsTrigger MEMBER arbsTrigger NOTIFY arbsChanged)
     Q_PROPERTY(int arbsTriggerStrength MEMBER arbsTriggerStrength NOTIFY arbsChanged)
     Q_PROPERTY(bool arbsVerboseLog MEMBER arbsVerboseLog NOTIFY arbsChanged)
+    // B2b 2-2: APEX first numbering (default on)
+    Q_PROPERTY(bool arbsApexFirst MEMBER arbsApexFirst NOTIFY arbsChanged)
     Q_PROPERTY(bool checkForUpdates MEMBER checkForUpdates NOTIFY checkForUpdatesChanged)
 
     // [Restore ASB defaults]: resets the ARBS items above (not checkForUpdates) and saves.
@@ -232,6 +234,7 @@ public:
     bool arbsTrigger;
     int arbsTriggerStrength;
     bool arbsVerboseLog;
+    bool arbsApexFirst;
     bool checkForUpdates;
 
 signals:

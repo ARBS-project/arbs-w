@@ -5,6 +5,12 @@
 
 #include "SDL_compat.h"
 
+#ifdef ARBS_W
+#include <vector>
+#include "arbs/arbs_bridge.h"
+#include "arbs/arbs_numbering.h"
+#endif
+
 struct GamepadState {
     SDL_GameController* controller;
     SDL_JoystickID jsId;
@@ -36,6 +42,15 @@ struct GamepadState {
     short lsX, lsY;
     short rsX, rsY;
     unsigned char lt, rt;
+
+#ifdef ARBS_W
+    // ARBS-W B2b: this pad's own arrival info (before the APEX override), kept for re-reports after a re-bind or a
+    // slot move, and the single-mode "arrival skipped" flag (APEX first). Zeroed with the slot like the rest.
+    uint8_t arbsType;
+    uint32_t arbsButtons;
+    uint32_t arbsCaps;
+    bool arbsArrivalSkipped;
+#endif
 };
 
 
@@ -155,6 +170,11 @@ public:
     static
     QString getUnmappedGamepads();
 
+#ifdef ARBS_W
+    // ARBS_SDL_CODE_APEX_CHECK (session.cpp): delayed presumed APEX check, then host re-reports.
+    void arbsHandleApexCheck(int generation);
+#endif
+
 private:
     enum KeyCombo {
         KeyComboQuit,
@@ -253,4 +273,14 @@ private:
     int m_NumFingersDown;
 
     static const int k_ButtonMap[];
+
+#ifdef ARBS_W
+    // ARBS-W B2b 2-1/2-2 (gamepad.cpp): host reports when the APEX binding or a slot changes.
+    void arbsApplyBind(const ArbsBind& bind);
+    bool arbsSendArrival(GamepadState* state, bool asApex);
+    void arbsRunSteps(const std::vector<arbsw::HostStep>& steps, GamepadState* state);
+    void arbsMovePad(int from, int to);
+    bool m_ArbsApexFirst;
+    arbsw::HostLedger m_ArbsHost;
+#endif
 };

@@ -1565,6 +1565,7 @@ Flickable {
                     arbsStrengthChoice.sync()
                     arbsTriggerCheck.checked = StreamingPreferences.arbsTrigger
                     arbsVerboseCheck.checked = StreamingPreferences.arbsVerboseLog
+                    arbsApexFirstCheck.checked = StreamingPreferences.arbsApexFirst
                 }
 
                 Label {
@@ -1649,6 +1650,17 @@ Flickable {
                     prefKey: "arbsTriggerStrength"
                     options: [ {text: "0%", val: 0}, {text: "20%", val: 20}, {text: "40%", val: 40}, {text: "60%", val: 60},
                                {text: "80%", val: 80}, {text: "100% (default)", val: 100} ]
+                }
+
+                CheckBox {
+                    id: arbsApexFirstCheck
+                    width: parent.width
+                    text: "APEX first: report the APEX as gamepad #1 (player 1), other gamepads after it (default on)"
+                    font.pointSize: 12
+                    checked: StreamingPreferences.arbsApexFirst
+                    onCheckedChanged: {
+                        StreamingPreferences.arbsApexFirst = checked
+                    }
                 }
 
                 CheckBox {

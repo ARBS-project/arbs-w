@@ -67,6 +67,11 @@ struct Impl {
     std::atomic<int64_t> triggerRumbleIgnored{0};
     int leftTrigger = 0, rightTrigger = 0;  // main thread only
     QString logDir;
+    arbsw::ApexBinder binder;               // main thread only (B2b 2-1)
+    SDL_TimerID checkTimer = 0;             // main thread only
+    std::atomic<SDL_TimerID> rttTimer{0};   // B2b 2-5
+    std::atomic<bool> rttLogged{false};
+    std::atomic<bool> verbose{false};
 };
 
 Impl* g_impl = nullptr;
@@ -93,13 +98,176 @@ arbsw::ArbsSettings settingsFrom(const StreamingPreferences& p) {
     return arbsw::settings::normalize(s);
 }
 
-int countFallbackPads() {
-    int n = 0;
+int64_t nowMs() { return g_impl->clock.nowNs() / 1000000LL; }
+
+// ---- B2b 2-5: Moonlight RTT -> Engine::onMoonlightRtt every second (session summary "Moonlight RTT 평균") ----
+Uint32 rttTimerCallback(Uint32 interval, void*) {
+    Impl* im = g_impl;
+    if (im == nullptr || !im->engine) return 0;
+    try {
+        uint32_t rtt = 0, var = 0;
+        // common-c: try-lock on the ENet mutex + cached values; false until the first RTT estimate exists.
+        if (LiGetEstimatedRttInfo(&rtt, &var)) {
+            im->engine->onMoonlightRtt(static_cast<int>(rtt));
+            if (!im->rttLogged.exchange(true)) {
+                logLine(arbs::jc::fmt("ARBS-W: Moonlight RTT 첫 표본 %ums(분산 %ums) - 1초마다 세션 요약 'Moonlight RTT 평균'에 반영",
+                                      rtt, var));
+            } else if (im->verbose && im->log && im->log->perSecondAllowed()) {
+                logLine(arbs::jc::fmt("Moonlight 통계: 네트워크RTT=%ums 분산=%ums", rtt, var));
+            }
+        }
+    } catch (...) {
+    }
+    return interval;
+}
+
+void startRttTimer() {
+    if (g_impl->rttTimer.load() != 0) return;
+    g_impl->rttLogged = false;
+    g_impl->rttTimer = SDL_AddTimer(1000, rttTimerCallback, nullptr);
+}
+
+// Before onSessionEnd, so the last summary has every sample and no sample arrives after the session (K10).
+void stopRttTimer() {
+    const SDL_TimerID t = g_impl->rttTimer.exchange(0);
+    if (t != 0) SDL_RemoveTimer(t);
+}
+
+// ---- B2b 2-1: delayed presumed check ----
+Uint32 checkTimerCallback(Uint32, void* param) {
+    // SDL timer thread: only post an event; the binder runs on the main thread.
+    SDL_Event ev = {};
+    ev.type = SDL_USEREVENT;
+    ev.user.code = ARBS_SDL_CODE_APEX_CHECK;
+    ev.user.data1 = param;
+    SDL_PushEvent(&ev);
+    return 0;
+}
+
+void scheduleCheckTimer(int64_t atMs) {
+    int64_t delay = atMs - nowMs();
+    if (delay < 1) delay = 1;
+    if (g_impl->checkTimer != 0) SDL_RemoveTimer(g_impl->checkTimer);
+    g_impl->checkTimer = SDL_AddTimer(static_cast<Uint32>(delay), checkTimerCallback,
+                                      reinterpret_cast<void*>(static_cast<intptr_t>(g_impl->binder.generation())));
+}
+
+void stopCheckTimer() {
+    if (g_impl->checkTimer != 0) SDL_RemoveTimer(g_impl->checkTimer);
+    g_impl->checkTimer = 0;
+}
+
+bool sdlHasExactDevice() {
     const int count = SDL_NumJoysticks();
     for (int i = 0; i < count; i++) {
-        if (SDL_JoystickGetDeviceVendor(i) == arbsw::kXInputFallbackVid && SDL_JoystickGetDeviceProduct(i) == arbsw::kXInputFallbackPid) n++;
+        if (arbsw::isExactVidPid(SDL_JoystickGetDeviceVendor(i), SDL_JoystickGetDeviceProduct(i))) return true;
     }
-    return n;
+    return false;
+}
+
+struct If2Scan {
+    bool done = false;
+    std::vector<arbsw::HidCandidate> list;
+    arbsw::If2Pick pick;
+    std::string diag;
+    int count() const { return done ? pick.count : -1; }
+    std::string text() const { return done ? arbs::jc::fmt(" (IF2 %d개; %s)", pick.count, diag.c_str()) : std::string(); }
+};
+
+void scanIf2(If2Scan& s) {
+    if (s.done) return;
+    s.list = arbsw::enumerateApexIf2(&s.diag);
+    s.pick = arbsw::pickApexIf2(s.list);
+    s.done = true;
+}
+
+// Stop sequence (engine thread, <= 1.5 s) and IF2 close; bridge state back to "no APEX".
+void unbindEngine(const char* reason) {
+    const int64_t t0 = g_impl->clock.nowNs();
+    g_impl->engine->detach(reason);
+    g_impl->apexIndex = -1;
+    g_impl->apexJs = kNoJoystick;
+    g_impl->leftTrigger = g_impl->rightTrigger = 0;
+    g_impl->gate.onApexRemoved();
+    {
+        std::lock_guard<std::mutex> g(g_impl->pendingMu);
+        g_impl->pending.valid = false;
+    }
+    logLine(arbs::jc::fmt("ARBS-W: 엔진 분리 완료(%s, %lldms)", reason,
+                          static_cast<long long>((g_impl->clock.nowNs() - t0) / 1000000LL)));
+}
+
+// IF2 open + attach + controller number + trigger/input seeds (B2b 2-3).
+bool bindTo(int js, int index, arbsw::ApexMatch kind, If2Scan& s) {
+    scanIf2(s);
+    if (s.pick.count != 1 || s.pick.index < 0) {
+        logLine("ARBS-W: APEX 연결 취소 - IF2 " + std::to_string(s.pick.count) + "개(정확히 1개일 때만) -> 일반 패드");
+        g_impl->binder.onBindFailed(js);
+        return false;
+    }
+    std::string why;
+    std::unique_ptr<arbsw::WinHidPort> port = arbsw::WinHidPort::open(s.list[static_cast<size_t>(s.pick.index)], *g_impl->log, &why);
+    if (!port) {
+        logLine("ARBS-W: " + why + " -> 일반 패드로 처리(PCM 햅틱 광고 안 함)");
+        g_impl->binder.onBindFailed(js);
+        return false;
+    }
+    g_impl->engine->attach(std::move(port));
+    g_impl->engine->setControllerNumber(index);
+    g_impl->apexIndex = index;
+    g_impl->apexJs = js;
+    // Seed: current L2/R2 of the bound pad (already pressed at bind time -> right position), same 0..255 unit as the
+    // ARBS-A IF0 trigger byte (B2b analysis 2-4).
+    uint16_t vid = 0, pid = 0;
+    int rawL = 0, rawR = 0;
+    SDL_GameController* gc = SDL_GameControllerFromInstanceID(static_cast<SDL_JoystickID>(js));
+    if (gc != nullptr) {
+        vid = SDL_GameControllerGetVendor(gc);
+        pid = SDL_GameControllerGetProduct(gc);
+        rawL = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERLEFT);
+        rawR = SDL_GameControllerGetAxis(gc, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    }
+    g_impl->leftTrigger = arbsw::triggerAxisTo255(rawL);
+    g_impl->rightTrigger = arbsw::triggerAxisTo255(rawR);
+    g_impl->engine->onTriggerPosition(g_impl->leftTrigger, g_impl->rightTrigger);
+    const bool exact = kind == arbsw::ApexMatch::Exact;
+    // An SDL XInput device with the APEX VID/PID = the pad is on the dongle: count it as the first input (no 3 s wait).
+    if (exact) g_impl->engine->onInputSeen();
+    logLine(arbs::jc::fmt("ARBS-W: APEX 연결 - 패드 번호 %d VID/PID %04x/%04x (%s), 트리거 시작값 L=%d R=%d", index, vid, pid,
+                          exact ? "VID/PID 일치" : "추정 매칭", g_impl->leftTrigger, g_impl->rightTrigger));
+    logLine(std::string("ARBS-W: Windows 안내 - Core 로그의 'IF0 입력 리포트'는 Windows 에서 APEX 패드의 SDL 버튼·축 입력을 뜻함"
+                        "(트리거 위치 = SDL L2/R2 0..32767 -> 0..255). ") +
+            (exact ? "VID/PID 일치 연결은 바로 입력 수신으로 처리(대기 없이 GetInfo)"
+                   : "추정 연결은 APEX 를 만지면 대기가 끝남('입력 리포트 없이 대기 만료'가 나와도 정상 - 3초 뒤 GetInfo 진행)"));
+    return true;
+}
+
+ArbsBind execute(const arbsw::ApexBinder::Decision& d, If2Scan& s) {
+    using A = arbsw::ApexBinder::Action;
+    ArbsBind r;
+    switch (d.action) {
+    case A::None:
+        break;
+    case A::BindExact:
+    case A::BindPresumed:
+        if (bindTo(d.bindJs, d.bindIndex, d.bindKind, s)) r.boundJs = d.bindJs;
+        break;
+    case A::Rebind:
+        logLine(arbs::jc::fmt("ARBS-W: APEX 다시 묶기 - 추정 연결 패드(번호 %d) -> VID/PID 일치 패드(번호 %d): 정지 시퀀스 후 재도착 보고",
+                              d.unbindIndex, d.bindIndex));
+        unbindEngine("APEX 다시 묶기");
+        r.unboundJs = d.unbindJs;
+        if (bindTo(d.bindJs, d.bindIndex, d.bindKind, s)) r.boundJs = d.bindJs;
+        break;
+    case A::Unbind:
+    case A::UnbindThenBindExact:
+        logLine("ARBS-W: APEX 패드 제거(SDL) -> 엔진 분리");
+        unbindEngine("SDL 제거");
+        if (d.action == A::UnbindThenBindExact && bindTo(d.bindJs, d.bindIndex, d.bindKind, s)) r.boundJs = d.bindJs;
+        break;
+    }
+    if (d.checkAtMs >= 0) scheduleCheckTimer(d.checkAtMs);
+    return r;
 }
 
 void logJoystickList() {
@@ -188,7 +356,7 @@ void ArbsBridge::initEarly(const QString& logDir) {
     const QStringList old = dir.entryList(QStringList("ARBS-*.log"), QDir::Files, QDir::Time);
     for (int i = 10; i < old.size(); i++) QFile(dir.filePath(old.at(i))).remove();
 
-    logLine(std::string("ARBS-W B2 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
+    logLine(std::string("ARBS-W B2b 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
     logLine(std::string("ARBS-W: 로그 폴더 = ") + (QFileInfo::exists(dir.filePath("portable.dat")) ? "포터블 폴더(exe 폴더)" : "임시 폴더"));
     size_t start = 0;
     while (start < g_earlyNotes.size()) {
@@ -205,6 +373,7 @@ void ArbsBridge::initEarly(const QString& logDir) {
 void ArbsBridge::shutdown(const char* reason) {
     if (g_impl == nullptr || !g_impl->engine) return;
     try {
+        stopRttTimer();
         g_impl->engine->onSessionEnd(reason);
         g_impl->engine->detach(reason);
         logLine(std::string("ARBS-W: 종료(") + reason + ") " + g_impl->engine->statusLine());
@@ -239,6 +408,8 @@ void ArbsBridge::onStreamLive(const StreamingPreferences& prefs) {
         } else {
             logLine("ARBS-W 경고: 엔진이 비활성이 되지 않아 이번 세션 설정 적용을 건너뜀");
         }
+        g_impl->verbose = s.verbose;
+        startRttTimer();
         const bool flush = g_impl->gate.setLive();
         SDL_Event ev = {};
         ev.type = SDL_USEREVENT;
@@ -258,6 +429,9 @@ void ArbsBridge::onMainThreadStreamLive(bool sendPendingArrival) {
 void ArbsBridge::onStreamEnd(const char* reason) {
     if (g_impl == nullptr) return;
     try {
+        stopRttTimer();
+        stopCheckTimer();
+        g_impl->binder.reset();  // pads are closed with the input handler; stale check events are ignored (generation)
         g_impl->gate.reset();
         {
             std::lock_guard<std::mutex> g(g_impl->pendingMu);
@@ -338,37 +512,54 @@ bool ArbsBridge::consumeAdaptiveTriggers(uint16_t controllerNumber, uint8_t even
 }
 
 // ------------------------------------------------------------------------------------------------ gamepad.cpp
-bool ArbsBridge::onGamepadAdded(int playerIndex, int joystickId, uint16_t sdlVid, uint16_t sdlPid) {
-    if (g_impl == nullptr || !arbsw::needsIf2Lookup(sdlVid, sdlPid)) return false;
+ArbsBind ArbsBridge::onGamepadAdded(int playerIndex, int joystickId, uint16_t sdlVid, uint16_t sdlPid) {
+    if (g_impl == nullptr) return ArbsBind();
     try {
-        std::string diag;
-        const std::vector<arbsw::HidCandidate> list = arbsw::enumerateApexIf2(&diag);
-        const arbsw::If2Pick pick = arbsw::pickApexIf2(list);
-        const int fallbackPads = countFallbackPads();
-        const arbsw::ApexMatch m = arbsw::identifyApex(sdlVid, sdlPid, pick.count, fallbackPads);
-        logLine(arbs::jc::fmt("ARBS-W: 패드 번호 %d VID/PID %04x/%04x -> %s (IF2 %d개, XInput 대체 VID/PID 패드 %d개; %s)", playerIndex, sdlVid,
-                              sdlPid, arbsw::apexMatchName(m), pick.count, fallbackPads, diag.c_str()));
-        if (m == arbsw::ApexMatch::None) return false;
-        if (g_impl->apexJs != kNoJoystick) {
-            logLine("ARBS-W: APEX 가 이미 연결되어 있음 - 이 패드는 일반 패드로 처리");
-            return false;
-        }
-        std::string why;
-        std::unique_ptr<arbsw::WinHidPort> port = arbsw::WinHidPort::open(list[static_cast<size_t>(pick.index)], *g_impl->log, &why);
-        if (!port) {
-            logLine("ARBS-W: " + why + " -> 일반 패드로 처리(PCM 햅틱 광고 안 함)");
-            return false;
-        }
-        g_impl->engine->attach(std::move(port));
-        g_impl->engine->setControllerNumber(playerIndex);
-        g_impl->apexIndex = playerIndex;
-        g_impl->apexJs = joystickId;
-        g_impl->leftTrigger = g_impl->rightTrigger = 0;
-        return true;
+        If2Scan s;
+        if (arbsw::isExactVidPid(sdlVid, sdlPid)) scanIf2(s);  // only 37D7/2502 needs HID enumeration at arrival
+        const arbsw::ApexBinder::Decision d =
+            g_impl->binder.onPadAdded(joystickId, playerIndex, sdlVid, sdlPid, nowMs(), s.count(), sdlHasExactDevice());
+        logLine(arbs::jc::fmt("ARBS-W: 패드 번호 %d VID/PID %04x/%04x -> %s%s", playerIndex, sdlVid, sdlPid, d.why.c_str(),
+                              s.text().c_str()));
+        return execute(d, s);
     } catch (...) {
         logLine("ARBS-W: APEX 확인 중 예외 - 일반 패드로 처리");
-        return false;
+        return ArbsBind();
     }
+}
+
+ArbsBind ArbsBridge::onApexCheck(int generation) {
+    if (g_impl == nullptr || generation != g_impl->binder.generation()) return ArbsBind();
+    try {
+        g_impl->checkTimer = 0;  // one-shot timer has fired
+        If2Scan s;
+        if (g_impl->binder.checkNeedsIf2()) scanIf2(s);
+        const arbsw::ApexBinder::Decision d = g_impl->binder.onCheck(nowMs(), s.count(), sdlHasExactDevice());
+        logLine("ARBS-W: APEX 추정 확인(첫 패드 도착 1000ms 뒤) -> " + d.why + s.text());
+        return execute(d, s);
+    } catch (...) {
+        logLine("ARBS-W: APEX 추정 확인 중 예외 - 연결 안 함");
+        return ArbsBind();
+    }
+}
+
+void ArbsBridge::onGamepadIndexChanged(int joystickId, int playerIndex) {
+    if (g_impl == nullptr) return;
+    g_impl->binder.onIndexChanged(joystickId, playerIndex);
+    if (g_impl->apexJs == joystickId) {
+        g_impl->apexIndex = playerIndex;
+        g_impl->engine->setControllerNumber(playerIndex);
+    }
+}
+
+bool ArbsBridge::isExactPad(uint16_t sdlVid, uint16_t sdlPid) { return arbsw::isExactVidPid(sdlVid, sdlPid); }
+
+bool ArbsBridge::sdlListHasExact() { return sdlHasExactDevice(); }
+
+bool ArbsBridge::apexBound() { return g_impl != nullptr && g_impl->apexJs != kNoJoystick; }
+
+void ArbsBridge::log(const char* line) {
+    if (line != nullptr) logLine(line);
 }
 
 uint32_t ArbsBridge::apexCaps(uint32_t sdlCaps) { return arbsw::apexCaps(sdlCaps); }
@@ -408,17 +599,17 @@ void ArbsBridge::sendApexArrival(int playerIndex, uint16_t activeGamepadMask, ui
     }
 }
 
-void ArbsBridge::onGamepadRemoved(int joystickId) {
-    if (g_impl == nullptr || joystickId == kNoJoystick || g_impl->apexJs != joystickId) return;
+ArbsBind ArbsBridge::onGamepadRemoved(int joystickId) {
+    if (g_impl == nullptr || joystickId == kNoJoystick) return ArbsBind();
     try {
-        logLine("ARBS-W: APEX 패드 제거(SDL) -> 엔진 분리");
-        g_impl->engine->detach("SDL 제거");
-        g_impl->apexIndex = -1;
-        g_impl->apexJs = kNoJoystick;
-        g_impl->gate.onApexRemoved();
-        std::lock_guard<std::mutex> g(g_impl->pendingMu);
-        g_impl->pending.valid = false;
+        const int index = g_impl->binder.indexOf(joystickId);
+        If2Scan s;
+        if (g_impl->binder.removalNeedsIf2(joystickId)) scanIf2(s);
+        const arbsw::ApexBinder::Decision d = g_impl->binder.onPadRemoved(joystickId, nowMs(), s.count());
+        if (index >= 0) logLine(arbs::jc::fmt("ARBS-W: 패드 번호 %d 제거(SDL) -> %s%s", index, d.why.c_str(), s.text().c_str()));
+        return execute(d, s);
     } catch (...) {
+        return ArbsBind();
     }
 }
 

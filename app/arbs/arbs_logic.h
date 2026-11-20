@@ -4,6 +4,7 @@
 // is unit-tested without touching a device (app/arbs/tests). Design: docs/analysis/B2_DESIGN.md sections 4-3..4-6.
 #pragma once
 
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -12,6 +13,7 @@
 
 #include "arbs/engine.h"
 #include "arbs/platform.h"
+#include "arbs_numbering.h"
 #include "arbs_settings.h"
 
 namespace arbsw {
@@ -57,6 +59,74 @@ const char* apexMatchName(ApexMatch m);
 ApexMatch identifyApex(uint16_t sdlVid, uint16_t sdlPid, int if2Count, int fallbackPadCount);
 // Only these VID/PIDs make the bridge enumerate HID at all.
 bool needsIf2Lookup(uint16_t sdlVid, uint16_t sdlPid);
+bool isExactVidPid(uint16_t sdlVid, uint16_t sdlPid);     // 37D7/2502
+bool isFallbackVidPid(uint16_t sdlVid, uint16_t sdlPid);  // 045E/028E
+
+// ---- B2b: which open SDL pad is the APEX (docs/analysis/B2b_APEX_ID.md section 5 2-1, 2-4) ----
+// Main thread only. Rules:
+//  1. 37D7/2502 + one IF2 -> Exact at once. Nothing bound -> BindExact; a Presumed pad bound -> Rebind to it;
+//     an Exact pad bound -> None (one dongle).
+//  2. 045E/028E is only a candidate: a check is scheduled at first-pad-arrival + kPresumeDelayMs.
+//  3. At the check, Presumed only if: nothing bound, no open Exact pad, no 37D7/2502 anywhere in the SDL list (also
+//     not-yet-opened devices), exactly one open 045E/028E pad, one IF2.
+//  4. Bound pad removed -> Unbind; an open Exact pad (one IF2) is bound at once, otherwise rule 3 again (new check).
+//  5. Any other pad removed -> list only, the engine is not touched.
+//  B2b addition (beyond the analysis, reported to the planner): once SDL has shown a 37D7/2502 device in this session,
+//  SDL can read the APEX VID/PID on this PC, so the XInput fallback presumption is not used for the rest of the session
+//  (prevents the built-in 045E/028E pad of a handheld from being bound when the APEX is switched off).
+class ApexBinder {
+public:
+    static constexpr int kNone = INT_MIN;
+    static constexpr int64_t kPresumeDelayMs = 1000;
+    enum class Action { None, BindExact, BindPresumed, Rebind, Unbind, UnbindThenBindExact };
+    struct Decision {
+        Action action = Action::None;
+        int bindJs = kNone;        // pad to bind (BindExact / BindPresumed / Rebind / UnbindThenBindExact)
+        int bindIndex = -1;
+        ApexMatch bindKind = ApexMatch::None;
+        int unbindJs = kNone;      // pad losing the binding (Rebind: still open; Unbind*: removed)
+        int unbindIndex = -1;
+        int64_t checkAtMs = -1;    // >= 0: call onCheck() at (or after) this time
+        std::string why;           // log text for the decision
+    };
+    static const char* actionName(Action a);
+
+    Decision onPadAdded(int js, int index, uint16_t vid, uint16_t pid, int64_t nowMs, int if2Count, bool sdlListHasExact);
+    // [if2Count] is only needed when removalNeedsIf2(js) is true (pass -1 otherwise).
+    Decision onPadRemoved(int js, int64_t nowMs, int if2Count);
+    Decision onCheck(int64_t nowMs, int if2Count, bool sdlListHasExact);
+    void onBindFailed(int js);               // IF2 could not be opened: nothing is bound
+    void onIndexChanged(int js, int index);  // slot move in gamepad.cpp
+    void reset();                            // session end: forget pads, new generation (stale checks are ignored)
+
+    int boundJs() const { return boundJs_; }
+    ApexMatch boundKind() const { return boundKind_; }
+    int generation() const { return gen_; }
+    bool checkPending() const { return checkPending_; }
+    bool exactSeen() const { return exactSeen_; }
+    bool removalNeedsIf2(int js) const;  // bound pad + an open Exact pad remains
+    bool checkNeedsIf2() const;          // a check could bind (nothing bound, one candidate)
+    size_t padCount() const { return pads_.size(); }
+    int indexOf(int js) const;           // -1 if unknown
+
+private:
+    struct Pad {
+        int js;
+        int index;
+        uint16_t vid, pid;
+    };
+    int64_t scheduleCheck(int64_t atMs);  // returns the time to report, or -1 if a check is already pending
+    int openCount(bool exact) const;
+
+    std::vector<Pad> pads_;
+    int boundJs_ = kNone;
+    ApexMatch boundKind_ = ApexMatch::None;
+    int64_t firstAddMs_ = -1;
+    int64_t checkAtMs_ = -1;
+    bool checkPending_ = false;
+    bool exactSeen_ = false;
+    int gen_ = 1;
+};
 
 // ---- frames (ARBS Core frame = 32 bytes; Windows HID output report = report ID 0x00 + 32, ASB WHT:263-272) ----
 constexpr size_t kFrameSize = 32;
