@@ -292,4 +292,37 @@ std::string pcmWaitLine(const PcmWait::Result& r);
 // "ARBS-W: 재연결 후 첫 PCM 없음(N ms 기다림, 번호 I, <reason>)" (접속 후 ... for the first arrival)
 std::string pcmWaitNoneLine(const PcmWait::Result& r, const char* reason);
 
+// ---- B3b F2 (ARBS-W b2e): diagnostics only, provisional decision D-B3b-3 (planner has not ruled) ----
+// docs/analysis/B3b.md section 2: after an IF2 detach (995) the dongle was not seen again. b2e only LOGS (D1-D3); the
+// mitigations m1 (Core: close the port when a late engine thread ends) and m2 (delayed IF2 open) wait for these logs.
+// D1: APEX command byte of a 32-byte Core frame (5A A5 <cmd> ...): 0x01 GetInfo, 0x53 motor route, 0x57 realtime;
+//     -1 when the magic does not match.
+int apexFrameCommand(const uint8_t frame[32]);
+// D1: "ARBS-W: IF2 열기 후 분리까지 N ms(GetInfo 송신 전|후 n회, 0x53 송신 전|후 n회)"
+std::string openToDetachLine(int64_t ms, uint64_t getInfoWrites, uint64_t motorRouteWrites);
+// D2: end of the engine unbind. 0 -> "ARBS-W: 엔진 분리 뒤 이 프로세스에 열린 IF2 포트 0개";
+//     > 0 -> a warning (an engine thread that did not end in 1.5 s keeps its IF2 handle, F2 hypothesis H1).
+std::string unbindPortsLine(int openPorts);
+// D3: 5 s and 30 s after an IF2 detach, once each, while SDL has no 37d7/2502 device: one Windows HID list summary.
+// Threads: start on the port reader/engine thread (detach), stop on the main thread (new bind / session end), onTick on
+// the SDL timer thread. One mutex.
+class HidRecheckWatch {
+public:
+    static constexpr int64_t kFirstMs = 5000;
+    static constexpr int64_t kSecondMs = 30000;
+    void start(int64_t nowNs);  // a later detach restarts both checkpoints
+    void stop();
+    // Due checkpoint: kFirstMs or kSecondMs (each once per start), 0 = nothing due. If both are due on the same tick
+    // (timer stalled > 30 s) only kSecondMs is returned (one HID scan).
+    int64_t onTick(int64_t nowNs);
+    bool active() const;
+
+private:
+    mutable std::mutex mu_;
+    bool active_ = false, firstDone_ = false, secondDone_ = false;
+    int64_t startNs_ = 0;
+};
+// D3: "ARBS-W: IF2 분리 S초 뒤 SDL 에 37d7/2502 없음 - Windows <hid summary>, 이 프로세스 IF2 포트 K개(F2 진단)"
+std::string hidRecheckLine(int64_t checkpointMs, const std::string& hidSummary, int ownPorts);
+
 }  // namespace arbsw

@@ -25,6 +25,7 @@
 
 #include "arbs/engine.h"
 #include "arbs/java_compat.h"
+#include "arbs/protocol.h"
 #include "fakes.h"
 #include "arbs_log.h"
 #include "arbs_logic.h"
@@ -33,6 +34,8 @@
 #include "mini_test.h"
 #include "win_clock.h"
 #include "win_hid_port.h"
+// B3b F1: the exact merge rule compiled into moonlight-common-c InputStream.c (relative to this file)
+#include "../../../moonlight-common-c/moonlight-common-c/src/ArbsMcBatch.h"
 
 using namespace arbsw;
 
@@ -1592,35 +1595,36 @@ struct FakeOpen {
 };
 }  // namespace
 
-// P2: error 32 twice, then the exclusive open succeeds (short overlap with another handle after a replug)
-TEST(b2c_if2, p02_exclusive_retry_succeeds) {
+// P2 (B3b F3 [잠정 D-B3b-2], was "error 32 twice then exclusive after retries"): error 32 once -> shared at once, even
+// though a second exclusive try would have succeeded (no retry, no wait, no re-acquire)
+TEST(b2c_if2, p02_busy_once_then_shared_at_once) {
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
     FakeOpen f;
-    f.exclusiveErrors = {32, 32, 0};
+    f.exclusiveErrors = {32, 0};
     f.handle = p.client;
     const int base = WinHidPort::openCount();
     std::string why;
     {
         std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
         CHECK(port != nullptr);
-        CHECK(port->exclusive());
+        CHECK(!port->exclusive());
         CHECK_EQ(WinHidPort::openCount(), base + 1);
     }
     CHECK_EQ(WinHidPort::openCount(), base);
-    CHECK_EQ(f.exclusiveCalls, 3);
-    CHECK_EQ(f.sharedCalls, 0);
-    CHECK_EQ(f.sleptMs, 200);
+    CHECK_EQ(f.exclusiveCalls, 1);
+    CHECK_EQ(f.sharedCalls, 1);
+    CHECK_EQ(f.sleptMs, 0);
     CHECK(log.has("IF2 열기 - 이 프로세스에 이미 열린 IF2 포트 " + std::to_string(base) + "개"));
-    CHECK(log.has("IF2 배타 열기 오류 32(공유 위반) - 100ms 간격으로 최대 20회 다시 시도"));  // B3 1-2: was 5
-    CHECK(log.has("IF2 배타 열기 성공(재시도 2회"));
-    CHECK(log.has("IF2 열림(배타"));
-    CHECK(!log.has("다른 프로그램이 IF2 를 쓰는 중"));
+    CHECK(!log.has("다시 시도"));          // b2d retry line gone
+    CHECK(!log.has("배타 열기 성공(재시도"));
+    CHECK(log.has("다른 프로그램이 IF2 를 쓰는 중"));
+    CHECK(log.has("IF2 열림(공유"));
     CloseHandle(p.server);
 }
 
-// P3: error 32 on every exclusive try -> shared open after <= 2 s (B3 1-2: was 0.5 s), warning kept + "0 ports of this process"
+// P3: error 32 on the exclusive try -> shared open at once (B3b F3: was after <= 2 s), warning kept + "0 ports of this process"
 TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
@@ -1635,12 +1639,12 @@ TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
         CHECK(!port->exclusive());
     }
     CHECK_EQ(f.exclusiveCalls, 1 + WinHidPort::kExclusiveRetries);
+    CHECK_EQ(f.exclusiveCalls, 1);  // B3b F3: was 21
     CHECK_EQ(f.sharedCalls, 1);
-    CHECK_EQ(f.sleptMs, 2000);  // B3 1-2: was 500
-    CHECK(f.sleptMs <= 2000);
+    CHECK_EQ(f.sleptMs, 0);  // B3b F3: was 2000
     CHECK(log.has("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
                   "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요"));
-    CHECK(log.has("배타 재시도 20회 모두 오류 32, 이 프로세스에 열린 IF2 포트 0개 - 0개면 ARBS-W 자신의 핸들이 아님"));  // B3 1-2: was 5
+    CHECK(log.has("(배타 재시도 0회, 이 프로세스에 열린 IF2 포트 0개 - 0개면 ARBS-W 자신의 핸들이 아님)"));  // B3b F3: was "20회 모두 오류 32"
     CHECK(log.has("IF2 열림(공유"));
     CloseHandle(p.server);
     // another error: no retry, shared at once; shared also failing -> nullptr + reason
@@ -1680,8 +1684,9 @@ TEST(b2c_if2, p04_detach_then_reopen_exclusive) {
     CaptureLog busy;
     std::unique_ptr<WinHidPort> second = WinHidPort::openWith(c, busy, &why, &WinHidPort::createFileAttempt, noWait);
     CHECK(second == nullptr);
-    CHECK_EQ(slept, 2000);  // B3 1-2: 20 x 100 ms (was 500)
+    CHECK_EQ(slept, 0);  // B3b F3: no retry wait (b2d: 2000)
     CHECK(busy.has("이 프로세스에 열린 IF2 포트 " + std::to_string(base + 1) + "개"));
+    CHECK(busy.has("ms(배타 재시도 0회, 결과 실패)"));
     CHECK_MSG(why == "IF2 열기 실패(공유 모드도 실패, 오류 32)", why);
     first.reset();  // = Engine::detach -> port_.reset(): reader joined, CloseHandle, events closed
     CHECK_EQ(WinHidPort::openCount(), base);
@@ -1758,35 +1763,36 @@ TEST(b2d_persist, b2_packet_order_same_as_b2c) {
     CHECK_MSG(h.all() == "mv0>1 hide100 R0/m=0x0 A0:apex/m=0x1 ", h.all());
 }
 
-// R1: error 32 x 19, then the exclusive open succeeds on the 20th retry (inside the 2 s window)
-TEST(b2d_if2, r1_exclusive_after_19_retries) {
+// R1 (B3b F3 [잠정 D-B3b-2], was "exclusive after 19 retries"): no exclusive retry at all - error 32 once, the next
+// exclusive try would succeed, but the port is opened shared at once and the stall line is still written
+TEST(b2d_if2, r1_no_exclusive_retry) {
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
     FakeOpen f;
-    f.exclusiveErrors.assign(19, 32);
-    f.exclusiveErrors.push_back(0);
+    f.exclusiveErrors = {32, 0};
     f.handle = p.client;
     std::string why;
     {
         std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
         CHECK(port != nullptr);
-        CHECK(port->exclusive());
+        CHECK(!port->exclusive());
     }
-    CHECK_EQ(WinHidPort::kExclusiveRetries, 20);
-    CHECK_EQ(WinHidPort::kRetryDelayMs, 100);
-    CHECK_EQ(f.exclusiveCalls, 20);
-    CHECK_EQ(f.sharedCalls, 0);
-    CHECK_EQ(f.sleptMs, 1900);
-    CHECK(log.has("IF2 배타 열기 성공(재시도 19회, 약 1900ms 뒤)"));
+    CHECK_EQ(WinHidPort::kExclusiveRetries, 0);  // B3b F3: was 20 (kRetryDelayMs 100 removed)
+    CHECK_EQ(f.exclusiveCalls, 1);
+    CHECK_EQ(f.sharedCalls, 1);
+    CHECK_EQ(f.sleptMs, 0);
+    CHECK(!log.has("배타 열기 성공(재시도"));
+    CHECK(!log.has("다시 시도"));
     CHECK(log.has("ARBS-W: IF2 열기 - 메인 스레드 정지 약 "));
-    CHECK(log.has("ms(배타 재시도 19회, 결과 배타)"));
-    CHECK(!log.has("다른 프로그램이 IF2 를 쓰는 중"));
+    CHECK(log.has("ms(배타 재시도 0회, 결과 공유)"));
+    CHECK(log.has("다른 프로그램이 IF2 를 쓰는 중"));
     CloseHandle(p.server);
 }
 
-// R2: error 32 on all 21 exclusive tries -> shared after 2,000 ms of retry waits; shared also failing -> "결과 실패"
-TEST(b2d_if2, r2_twenty_retries_then_shared) {
+// R2 (B3b F3, was "twenty retries then shared"): error 32 -> one exclusive try, shared at once, one stall line;
+// shared also failing -> "결과 실패"
+TEST(b2d_if2, r2_busy_then_shared_no_wait) {
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
@@ -1799,11 +1805,12 @@ TEST(b2d_if2, r2_twenty_retries_then_shared) {
         CHECK(port != nullptr);
         CHECK(!port->exclusive());
     }
-    CHECK_EQ(f.exclusiveCalls, 21);
+    CHECK_EQ(f.exclusiveCalls, 1);
     CHECK_EQ(f.sharedCalls, 1);
-    CHECK_EQ(f.sleptMs, 2000);
-    CHECK(log.has("배타 재시도 20회 모두 오류 32"));
-    CHECK(log.has("ms(배타 재시도 20회, 결과 공유)"));
+    CHECK_EQ(f.sleptMs, 0);
+    CHECK(!log.has("모두 오류 32"));
+    CHECK(log.has("배타 재시도 0회, 이 프로세스에 열린 IF2 포트"));
+    CHECK(log.has("ms(배타 재시도 0회, 결과 공유)"));
     CHECK_EQ(countLines(log, "메인 스레드 정지 약"), 1);
     CloseHandle(p.server);
     CaptureLog log2;
@@ -1811,8 +1818,10 @@ TEST(b2d_if2, r2_twenty_retries_then_shared) {
     g.exclusiveErrors = {32};
     g.sharedError = 5;
     CHECK(WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log2, &why, g.fn(), g.sleep()) == nullptr);
-    CHECK_EQ(g.sleptMs, 2000);
-    CHECK(log2.has("ms(배타 재시도 20회, 결과 실패)"));
+    CHECK_EQ(g.exclusiveCalls, 1);
+    CHECK_EQ(g.sleptMs, 0);
+    CHECK(log2.has("ms(배타 재시도 0회, 결과 실패)"));
+    CHECK_EQ(countLines(log2, "메인 스레드 정지 약"), 1);
     CHECK_MSG(why == "IF2 열기 실패(공유 모드도 실패, 오류 5)", why);
 }
 
@@ -1849,29 +1858,38 @@ TEST(b2d_if2, r3_no_retry_no_stall_line) {
     CloseHandle(q.server);
 }
 
-// R4: the stall line is the real (steady clock) blocked time, not the planned sleep sum
+// R4 (B3b F3): the stall line is the real (steady clock) blocked time of the whole open (here: a slow shared open),
+// and the sleep seam is never called
 TEST(b2d_if2, r4_stall_line_is_real_time) {
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
-    FakeOpen f;
-    f.exclusiveErrors = {32, 32, 32, 0};
-    f.handle = p.client;
-    int planned = 0;
-    const WinHidPort::SleepFn realSleep = [&planned](int ms) {
-        planned += ms;
-        Sleep(30);  // shorter than the 100 ms asked for: the line must show ~90 ms, not 300 ms
+    int exclusiveCalls = 0, sharedCalls = 0, planned = 0;
+    const WinHidPort::OpenFn slowShared = [&](const std::wstring&, bool exclusive) {
+        WinHidPort::OpenAttempt a;
+        if (exclusive) {
+            exclusiveCalls++;
+            a.error = 32;
+        } else {
+            sharedCalls++;
+            Sleep(60);  // the real CreateFileW time is what the line must show
+            a.handle = p.client;
+        }
+        return a;
     };
+    const WinHidPort::SleepFn countSleep = [&planned](int ms) { planned += ms; };
     std::string why;
     {
-        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), realSleep);
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, slowShared, countSleep);
         CHECK(port != nullptr);
-        CHECK(port->exclusive());
+        CHECK(!port->exclusive());
     }
-    CHECK_EQ(planned, 300);
+    CHECK_EQ(planned, 0);
+    CHECK_EQ(exclusiveCalls, 1);
+    CHECK_EQ(sharedCalls, 1);
     const long long ms = loggedStallMs(log);
-    CHECK_MSG(ms >= 85 && ms < 300, std::to_string(ms));
-    CHECK(log.has("ms(배타 재시도 3회, 결과 배타)"));
+    CHECK_MSG(ms >= 55 && ms < 1000, std::to_string(ms));
+    CHECK(log.has("ms(배타 재시도 0회, 결과 공유)"));
     CloseHandle(p.server);
     CHECK_MSG(openStallLine(1234, 7, "공유") == "ARBS-W: IF2 열기 - 메인 스레드 정지 약 1234 ms(배타 재시도 7회, 결과 공유)",
               openStallLine(1234, 7, "공유"));
@@ -2077,6 +2095,309 @@ TEST(b2d_detach, d3_stale_generation_and_port_listener) {
     }
     CHECK_EQ(calls.load(), 1);
     CHECK(waitFor([&] { return log.has("IF2 분리 감지"); }, 2000));
+}
+
+// ------------------------------------------------------------------------------------------------ B3b (ARBS-W b2e)
+// docs/analysis/B3b.md: F1-T1..T3 (MC merge rule, provisional decision D-B3b-1), F2 D1-D3 diagnostics (D-B3b-3).
+namespace {
+
+// F1 wire model: one moonlight-common-c input queue (InputStream.c sendControllerEventInternal :1144-1251,
+// sendControllerArrivalEvent :1559-1582). current[n] = queued MC holder of number n that a later MC may update in place
+// (cleared when the send thread takes the queue). An arrival is its own queue item and is followed by an MC.
+struct WirePkt {
+    bool arrival = false;
+    int index = 0;
+    uint16_t mask = 0, buttons = 0, caps = 0;
+    uint8_t lt = 0, rt = 0;
+};
+struct WireModel {
+    bool maskRule = true;  // true = ArbsMcBatchCompatible (b2e), false = upstream rule without the mask (control run)
+    std::vector<WirePkt> queue;
+    int current[16];
+    WireModel() { std::fill(current, current + 16, -1); }
+    void mc(int index, uint16_t mask, uint16_t buttons = 0, uint8_t lt = 0, uint8_t rt = 0) {
+        int h = current[index];
+        if (h >= 0) {
+            const WirePkt& q = queue[static_cast<size_t>(h)];
+            const int ok = maskRule ? ArbsMcBatchCompatible(q.buttons, 0, q.lt, q.rt, q.mask, buttons, 0, lt, rt, mask)
+                                    : ArbsMcBatchFieldsCompatible(q.buttons, 0, q.lt, q.rt, buttons, 0, lt, rt);
+            if (!ok) h = -1;
+        }
+        if (h < 0) {
+            WirePkt p;
+            p.index = index;
+            p.buttons = buttons;
+            queue.push_back(p);
+            h = static_cast<int>(queue.size()) - 1;
+            current[index] = h;
+        }
+        WirePkt& w = queue[static_cast<size_t>(h)];  // InputStream.c :1235: mask/triggers/sticks always overwritten
+        w.mask = mask;
+        w.lt = lt;
+        w.rt = rt;
+    }
+    void arrival(int index, uint16_t mask, uint16_t caps) {
+        WirePkt p;
+        p.arrival = true;
+        p.index = index;
+        p.mask = mask;
+        p.caps = caps;
+        queue.push_back(p);
+        mc(index, mask);  // "Send a MC event just in case the host software doesn't support arrival events"
+    }
+    // send thread takes everything that is queued (worst case: only after step 3)
+    std::vector<WirePkt> drain() {
+        std::fill(current, current + 16, -1);
+        std::vector<WirePkt> out;
+        out.swap(queue);
+        return out;
+    }
+};
+
+// F1 host model (Vibepollo 2.18.9 / ARBS-H): arrival on an allocated number -> "already allocated" + return
+// (H:src/input.cpp:1263-1266); MC whose mask lacks a number -> reset (1639-1646), with gcpersist the DualSense is kept
+// ("retained", dualsense_usbip_gamepad.cpp:605-606) and the next arrival re-binds it with that arrival's caps
+// (:452/:469 waveform_capable = caps & PCM); MC with the bit for an unallocated number -> legacy creation without
+// caps (input.cpp:1659). PCM is forwarded only for a waveform-capable pad (dualsense_usbip_gamepad.cpp:281-290).
+struct HostPadModel {
+    struct Pad {
+        bool allocated = false, retained = false, waveform = false;
+    };
+    Pad pads[16];
+    std::vector<std::string> log;
+    void apply(const WirePkt& p) {
+        Pad& g = pads[p.index];
+        if (p.arrival) {
+            if (g.allocated) {
+                log.push_back("ControllerNumber already allocated");
+                return;
+            }
+            log.push_back(g.retained ? "rebound" : "created");
+            g.allocated = true;
+            g.retained = false;
+            g.waveform = (p.caps & kCapHapticsPcm) != 0;
+            return;
+        }
+        for (int i = 0; i < 16; i++) {
+            if (!(p.mask & (1u << i)) && pads[i].allocated) {
+                pads[i].allocated = false;
+                pads[i].retained = true;
+                log.push_back("retained");
+            }
+        }
+        if ((p.mask & (1u << p.index)) && !g.allocated) {
+            g.allocated = true;
+            g.retained = false;
+            g.waveform = false;
+            log.push_back("legacy created");
+        }
+    }
+    std::string pcm(int index) const {
+        return pads[index].allocated && pads[index].waveform ? "PCM frame accepted" : "PCM not forwarded: controller lacks waveform capability";
+    }
+    bool has(const std::string& s) const { return std::find(log.begin(), log.end(), s) != log.end(); }
+};
+
+constexpr uint16_t kBuiltinCaps = 0x43;  // EA-B3-U-01: built-in pad arrival caps
+
+// F1-T2/T3 scenario: session starts without the APEX (built-in pad created number 0 with caps 0x43), then the APEX
+// arrives: the real planArrival steps (Remove(0, 0x0) + APEX Arrival(0, 0x1)) go through the wire model and the send
+// thread takes the queue only after step 3 (worst case). [pendingInput] = the built-in pad's last input MC is still queued.
+HostPadModel runF1Scenario(bool maskRule, bool multi, bool pendingInput) {
+    HostPadModel host;
+    WireModel wire;
+    wire.maskRule = maskRule;
+    HostLedger led;
+    const int builtinJs = 3, apexJs = 9;
+    // connect: built-in arrival + its MC, sent
+    std::vector<HostStep> first = planArrival(led, multi, true, 0, false, builtinJs, 0x1);
+    for (const HostStep& s : first) led.sent(s, builtinJs);
+    wire.arrival(0, 0x1, kBuiltinCaps);
+    for (const WirePkt& p : wire.drain()) host.apply(p);
+    if (pendingInput) wire.mc(0, 0x1, 0, 0, 0);
+    // APEX arrives (APEX-only: the built-in pad becomes hidden, mask = APEX bit only)
+    const std::vector<HostStep> steps = planArrival(led, multi, true, 0, true, apexJs, 0x1);
+    for (const HostStep& s : steps) {
+        if (s.kind == HostStep::Kind::Remove) wire.mc(s.index, s.mask);
+        else wire.arrival(s.index, s.mask, static_cast<uint16_t>(apexCaps(kBuiltinCaps)));
+        led.sent(s, apexJs);
+    }
+    for (const WirePkt& p : wire.drain()) host.apply(p);
+    return host;
+}
+
+}  // namespace
+
+// F1-T1: merge rule table (the function InputStream.c calls)
+TEST(b3b_f1, t1_merge_rule) {
+    // same buttons, different mask -> no merge (new); same buttons, same mask -> merge; different buttons -> no merge (upstream)
+    CHECK(!ArbsMcBatchCompatible(0, 0, 0, 0, 0x0, 0, 0, 0, 0, 0x1));
+    CHECK(!ArbsMcBatchCompatible(0, 0, 0, 0, 0x3, 0, 0, 0, 0, 0x1));
+    CHECK(ArbsMcBatchCompatible(0, 0, 0, 0, 0x1, 0, 0, 0, 0, 0x1));
+    CHECK(ArbsMcBatchCompatible(0x1000, 0, 20, 30, 0x1, 0x1000, 0, 40, 60, 0x1));  // travel inside a range still merges
+    CHECK(!ArbsMcBatchCompatible(0x1000, 0, 0, 0, 0x1, 0x0000, 0, 0, 0, 0x1));
+    CHECK(!ArbsMcBatchCompatible(0, 0x1, 0, 0, 0x1, 0, 0x0, 0, 0, 0x1));
+    // upstream trigger edges unchanged: rest <-> pressed, crossing 0xF0
+    CHECK(!ArbsMcBatchCompatible(0, 0, 0, 0, 0x1, 0, 0, 1, 0, 0x1));
+    CHECK(!ArbsMcBatchCompatible(0, 0, 0, 5, 0x1, 0, 0, 0, 0, 0x1));
+    CHECK(!ArbsMcBatchCompatible(0, 0, 0xEF, 0, 0x1, 0, 0, 0xF0, 0, 0x1));
+    CHECK(!ArbsMcBatchCompatible(0, 0, 0, 0xF0, 0x1, 0, 0, 0, 0xEF, 0x1));
+    // the upstream part alone ignores the mask (control rule for F1-T3)
+    CHECK(ArbsMcBatchFieldsCompatible(0, 0, 0, 0, 0, 0, 0, 0));
+    CHECK(!ArbsMcBatchFieldsCompatible(1, 0, 0, 0, 0, 0, 0, 0));
+    // exhaustive equivalence with the upstream expression when the masks are equal (buttons x trigger edges)
+    const uint8_t trig[] = {0, 1, 0xEF, 0xF0, 0xFF};
+    int checked = 0;
+    const uint16_t btn[] = {0, 1, 0x8000};
+    for (uint16_t hb : btn)
+        for (uint16_t nb : btn)
+            for (uint8_t hl : trig)
+                for (uint8_t nl : trig)
+                    for (uint8_t hr : trig)
+                        for (uint8_t nr : trig) {
+                            const bool upstream = !(hb != nb || (hl == 0) != (nl == 0) || (hr == 0) != (nr == 0) ||
+                                                    (hl >= 0xF0) != (nl >= 0xF0) || (hr >= 0xF0) != (nr >= 0xF0));
+                            CHECK_EQ(ArbsMcBatchCompatible(hb, 0, hl, hr, 0x1, nb, 0, nl, nr, 0x1) != 0, upstream);
+                            checked++;
+                        }
+    CHECK_EQ(checked, 9 * 625);
+}
+
+// F1-T2: start with the built-in pad (0x43) -> APEX arrives -> first PCM accepted (b2e rule), worst-case send timing
+TEST(b3b_f1, t2_builtin_then_apex_first_pcm_accepted) {
+    CHECK((apexCaps(kBuiltinCaps) & kCapHapticsPcm) != 0);
+    for (int multi = 0; multi < 2; multi++) {
+        for (int pending = 0; pending < 2; pending++) {
+            const HostPadModel h = runF1Scenario(true, multi == 1, pending == 1);
+            const std::string tag = arbs::jc::fmt("multi=%d pending=%d", multi, pending);
+            CHECK_MSG(!h.has("ControllerNumber already allocated"), tag);
+            CHECK_MSG(h.has("retained") && h.has("rebound"), tag);
+            CHECK_MSG(h.pads[0].allocated && h.pads[0].waveform, tag);
+            CHECK_MSG(h.pcm(0) == "PCM frame accepted", tag);
+        }
+    }
+    // wire order on channel 0 (multi, worst case): removal MC 0x0, APEX arrival, MC 0x1 = three separate packets
+    WireModel w;
+    w.mc(0, 0x0);
+    w.arrival(0, 0x1, 0x8043);
+    const std::vector<WirePkt> q = w.drain();
+    CHECK_EQ(q.size(), static_cast<size_t>(3));
+    CHECK(!q[0].arrival && q[0].mask == 0x0);
+    CHECK(q[1].arrival && q[1].mask == 0x1);
+    CHECK(!q[2].arrival && q[2].mask == 0x1);
+}
+
+// F1-T3: control run - the old rule (no mask comparison) reproduces the field failure (EA-B3-U-01 / L1:597)
+TEST(b3b_f1, t3_control_old_rule_fails) {
+    for (int multi = 0; multi < 2; multi++) {
+        for (int pending = 0; pending < 2; pending++) {
+            const HostPadModel h = runF1Scenario(false, multi == 1, pending == 1);
+            const std::string tag = arbs::jc::fmt("multi=%d pending=%d", multi, pending);
+            CHECK_MSG(h.has("ControllerNumber already allocated"), tag);
+            CHECK_MSG(!h.has("rebound"), tag);
+            CHECK_MSG(h.pads[0].allocated && !h.pads[0].waveform, tag);
+            CHECK_MSG(h.pcm(0) == "PCM not forwarded: controller lacks waveform capability", tag);
+        }
+    }
+    WireModel w;
+    w.maskRule = false;
+    w.mc(0, 0x0);
+    w.arrival(0, 0x1, 0x8043);
+    const std::vector<WirePkt> q = w.drain();
+    CHECK_EQ(q.size(), static_cast<size_t>(2));  // the removal MC was overwritten with mask 0x1
+    CHECK(!q[0].arrival && q[0].mask == 0x1);
+}
+
+// F2 D1-D3 line formats + frame command classifier
+TEST(b3b_f2, d_lines_and_frame_command) {
+    const arbs::protocol::Frame gi = arbs::protocol::buildGetInfo();
+    const arbs::protocol::Frame en = arbs::protocol::gripRealtimeEnable();
+    CHECK_EQ(apexFrameCommand(gi.data()), 0x01);
+    CHECK_EQ(apexFrameCommand(en.data()), 0x53);
+    uint8_t bad[32] = {0x57, 0xA5, 0x53};
+    CHECK_EQ(apexFrameCommand(bad), -1);
+    CHECK_MSG(openToDetachLine(11, 0, 0) == "ARBS-W: IF2 열기 후 분리까지 11 ms(GetInfo 송신 전, 0x53 송신 전)", openToDetachLine(11, 0, 0));
+    CHECK_MSG(openToDetachLine(3500, 2, 1) == "ARBS-W: IF2 열기 후 분리까지 3500 ms(GetInfo 송신 후 2회, 0x53 송신 후 1회)",
+              openToDetachLine(3500, 2, 1));
+    CHECK_MSG(unbindPortsLine(0) == "ARBS-W: 엔진 분리 뒤 이 프로세스에 열린 IF2 포트 0개", unbindPortsLine(0));
+    CHECK_MSG(unbindPortsLine(1) ==
+                  "ARBS-W 경고: 엔진 분리 뒤 이 프로세스에 열린 IF2 포트 1개 - 엔진 스레드가 1.5초 안에 끝나지 않아 IF2 핸들이 남음"
+                  "(다음 연결 때 정리; 동글 재인식을 막을 수 있음, F2 진단)",
+              unbindPortsLine(1));
+    const std::string sum = "HID 인터페이스 12개 중 APEX 동글 경로 0개(열림 0), IF2(UsagePage 0xFFA0) 0개";
+    CHECK_MSG(hidRecheckLine(5000, sum, 0) ==
+                  "ARBS-W: IF2 분리 5초 뒤 SDL 에 37d7/2502 없음 - Windows HID 인터페이스 12개 중 APEX 동글 경로 0개(열림 0), "
+                  "IF2(UsagePage 0xFFA0) 0개, 이 프로세스 IF2 포트 0개(F2 진단)",
+              hidRecheckLine(5000, sum, 0));
+    CHECK(hidRecheckLine(30000, sum, 1).find("IF2 분리 30초 뒤") != std::string::npos);
+}
+
+// F2-D3: checkpoints 5 s and 30 s once each per start; stop cancels; a new start restarts
+TEST(b3b_f2, d3_recheck_watch) {
+    HidRecheckWatch w;
+    CHECK_EQ(w.onTick(msNs(100000)), 0ll);  // not started
+    w.start(msNs(1000));
+    CHECK(w.active());
+    CHECK_EQ(w.onTick(msNs(5999)), 0ll);
+    CHECK_EQ(w.onTick(msNs(6000)), 5000ll);
+    CHECK_EQ(w.onTick(msNs(7000)), 0ll);  // once
+    CHECK_EQ(w.onTick(msNs(30999)), 0ll);
+    CHECK_EQ(w.onTick(msNs(31000)), 30000ll);
+    CHECK(!w.active());
+    CHECK_EQ(w.onTick(msNs(60000)), 0ll);
+    // stop (new bind / session end) before 5 s -> nothing
+    w.start(msNs(100000));
+    w.stop();
+    CHECK_EQ(w.onTick(msNs(200000)), 0ll);
+    // timer stalled past 30 s -> one scan only (30 s)
+    w.start(msNs(300000));
+    CHECK_EQ(w.onTick(msNs(340000)), 30000ll);
+    CHECK_EQ(w.onTick(msNs(341000)), 0ll);
+    // restart after the first checkpoint
+    w.start(msNs(400000));
+    CHECK_EQ(w.onTick(msNs(405000)), 5000ll);
+    w.start(msNs(406000));
+    CHECK_EQ(w.onTick(msNs(411000)), 5000ll);
+    CHECK(HidRecheckWatch::kFirstMs == 5000 && HidRecheckWatch::kSecondMs == 30000);
+}
+
+// F2-D1: the real port over a pipe - GetInfo + 0x53 written, then the other end goes away -> one D1 line after the
+// "IF2 분리 감지" line; a port that wrote nothing reports "송신 전"
+TEST(b3b_f2, d1_open_to_detach_over_pipe) {
+    {
+        PipePair p = makePipe();
+        CHECK(p.client != INVALID_HANDLE_VALUE);
+        CaptureLog log;
+        {
+            WinHidPort port(p.client, 33, 33, log, true);
+            const arbs::protocol::Frame gi = arbs::protocol::buildGetInfo();
+            const arbs::protocol::Frame en = arbs::protocol::gripRealtimeEnable();
+            CHECK(port.writeFrame(gi.data(), 100) == arbs::IoResult::Ok);
+            CHECK(port.writeFrame(en.data(), 100) == arbs::IoResult::Ok);
+            uint8_t rt[32] = {0x5A, 0xA5, 0x57};
+            CHECK(port.writeFrame(rt, 100) == arbs::IoResult::Ok);
+            CHECK_EQ(port.stats().getInfoWrites, 1ull);
+            CHECK_EQ(port.stats().motorRouteWrites, 1ull);
+            CHECK_EQ(port.stats().writes, 3ull);
+            CloseHandle(p.server);
+            p.server = INVALID_HANDLE_VALUE;
+            CHECK(waitFor([&] { return log.has("IF2 열기 후 분리까지"); }, 2000));
+        }
+        CHECK(log.has("ms(GetInfo 송신 후 1회, 0x53 송신 후 1회)"));
+        CHECK_EQ(countLines(log, "IF2 열기 후 분리까지"), 1);
+    }
+    {
+        PipePair p = makePipe();
+        CHECK(p.client != INVALID_HANDLE_VALUE);
+        CaptureLog log;
+        {
+            WinHidPort port(p.client, 33, 33, log, false);
+            CloseHandle(p.server);
+            p.server = INVALID_HANDLE_VALUE;
+            CHECK(waitFor([&] { return log.has("IF2 열기 후 분리까지"); }, 2000));
+        }
+        CHECK(log.has("ms(GetInfo 송신 전, 0x53 송신 전)"));
+    }
 }
 
 int main(int argc, char** argv) {

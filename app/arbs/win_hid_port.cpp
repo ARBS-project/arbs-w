@@ -28,6 +28,11 @@ namespace {
 
 std::string winErr(DWORD e) { return std::to_string(static_cast<unsigned long>(e)); }
 
+int64_t steadyNs() {
+    return static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ enumeration
@@ -128,47 +133,37 @@ std::unique_ptr<WinHidPort> WinHidPort::openWith(const HidCandidate& c, arbs::IL
     // Exclusive first (design 4-4): keeps Space Station / XHaptics / SDL from writing to IF2 while ARBS owns it.
     bool exclusive = true;
     OpenAttempt a = openFn(c.path, true);
-    // B2c 2-2: a sharing violation right after a dongle replug may be another handle opened only for a moment ->
-    // bounded exclusive retry (kExclusiveRetries x kRetryDelayMs) before falling back to the shared open.
-    // B3 1-2 [잠정 D-B3-2]: 20 x 100 ms (<= 2 s), blocking; the blocked time is logged below.
-    int retries = 0;
-    while (a.handle == nullptr && a.error == ERROR_SHARING_VIOLATION && retries < kExclusiveRetries) {
-        if (retries == 0) {
-            log.info(arbs::jc::fmt("ARBS-W: IF2 배타 열기 오류 32(공유 위반) - %dms 간격으로 최대 %d회 다시 시도", kRetryDelayMs,
-                                   kExclusiveRetries));
-        }
-        sleepFn(kRetryDelayMs);
-        retries++;
-        a = openFn(c.path, true);
-    }
-    if (a.handle != nullptr && retries > 0) {
-        log.info(arbs::jc::fmt("ARBS-W: IF2 배타 열기 성공(재시도 %d회, 약 %dms 뒤)", retries, retries * kRetryDelayMs));
-    }
+    // B3b F3 [잠정 D-B3b-2] (replaces B2c 2-2 retry / B3 1-2 D-B3-2): one exclusive try only. Error 32 -> shared at
+    // once, no sleep, no exclusive re-acquire later. sleepFn stays in the signature as a test seam and is not called.
+    (void)sleepFn;
+    const int retries = kExclusiveRetries;  // 0: kept in the log lines below so the wording stays comparable to b2d
+    const bool sharingViolation = a.handle == nullptr && a.error == ERROR_SHARING_VIOLATION;
     if (a.handle == nullptr) {
         const unsigned long e = a.error;
         if (e == ERROR_SHARING_VIOLATION) {
             log.info("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
                      "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요" +
-                     arbs::jc::fmt(" (배타 재시도 %d회 모두 오류 32, 이 프로세스에 열린 IF2 포트 %d개 - 0개면 ARBS-W 자신의 핸들이 아님)",
-                                   retries, openCount()));
+                     arbs::jc::fmt(" (배타 재시도 %d회, 이 프로세스에 열린 IF2 포트 %d개 - 0개면 ARBS-W 자신의 핸들이 아님)", retries,
+                                   openCount()));
         } else {
             log.info("ARBS-W: IF2 배타 열기 실패(오류 " + winErr(e) + ") -> 공유 모드로 다시 시도");
         }
         exclusive = false;
         a = openFn(c.path, false);
         if (a.handle == nullptr) {
-            if (retries > 0) log.info(openStallLine(stallMs(), retries, "실패"));
+            if (sharingViolation) log.info(openStallLine(stallMs(), retries, "실패"));
             if (why) *why = "IF2 열기 실패(공유 모드도 실패, 오류 " + winErr(a.error) + ")";
             return nullptr;
         }
     }
-    if (retries > 0) log.info(openStallLine(stallMs(), retries, exclusive ? "배타" : "공유"));
+    // B3b F3: the stall line whenever error 32 happened (b2d: only after a retry); no error 32 -> no line (test r3)
+    if (sharingViolation) log.info(openStallLine(stallMs(), retries, exclusive ? "배타" : "공유"));
     return std::unique_ptr<WinHidPort>(new WinHidPort(a.handle, c.outLen, c.inLen, log, exclusive));
 }
 
 // ------------------------------------------------------------------------------------------------ port
 WinHidPort::WinHidPort(void* handle, uint16_t outLen, uint16_t inLen, arbs::ILog& log, bool exclusive)
-    : h_(handle), outLen_(outLen), inLen_(inLen), log_(log), exclusive_(exclusive) {
+    : h_(handle), outLen_(outLen), inLen_(inLen), log_(log), exclusive_(exclusive), openedNs_(steadyNs()) {
     s_open_.fetch_add(1);
     writeEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     readEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -213,6 +208,16 @@ WinHidPort::Stats WinHidPort::stats() const {
 void WinHidPort::markDisconnected(unsigned long err, const char* where) {
     if (!disconnected_.exchange(true)) {
         log_.info(std::string("ARBS-W: IF2 분리 감지(") + where + ", 오류 " + std::to_string(err) + ")");
+        // B3b F2-D1 [잠정 D-B3b-3]: open -> detach time and how far the Core start sequence got (log only)
+        {
+            uint64_t getInfo = 0, motor = 0;
+            {
+                std::lock_guard<std::mutex> g(statsMu_);
+                getInfo = stats_.getInfoWrites;
+                motor = stats_.motorRouteWrites;
+            }
+            log_.info(openToDetachLine((steadyNs() - openedNs_) / 1000000LL, getInfo, motor));
+        }
         // B3 1-3: tell the bridge once (it records the detach time for the "SDL 제거까지 N ms" / 5 s notice lines)
         std::lock_guard<std::mutex> g(listenerMu_);
         if (disconnectListener_ && !listenerCalled_) {
@@ -256,8 +261,11 @@ arbs::IoResult WinHidPort::writeFrame(const uint8_t frame[32], int timeoutMs) {
     ov->hEvent = ev;
     ResetEvent(ev);
     {
+        const int cmd = apexFrameCommand(frame);  // B3b F2-D1
         std::lock_guard<std::mutex> g(statsMu_);
         stats_.writes++;
+        if (cmd == 0x01) stats_.getInfoWrites++;
+        else if (cmd == 0x53) stats_.motorRouteWrites++;
     }
     if (!WriteFile(h, wbuf_.data(), static_cast<DWORD>(n), nullptr, ov)) {
         const DWORD e = GetLastError();

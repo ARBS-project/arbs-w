@@ -731,4 +731,63 @@ std::string pcmWaitNoneLine(const PcmWait::Result& r, const char* reason) {
                          reason != nullptr ? reason : "?");
 }
 
+// ---- B3b F2 (b2e): diagnostics only [잠정 D-B3b-3] ----
+int apexFrameCommand(const uint8_t frame[32]) {
+    if (frame == nullptr || frame[0] != 0x5A || frame[1] != 0xA5) return -1;
+    return frame[2];
+}
+
+std::string openToDetachLine(int64_t ms, uint64_t getInfoWrites, uint64_t motorRouteWrites) {
+    const auto part = [](const char* what, uint64_t n) {
+        return n == 0 ? std::string(what) + " 송신 전" : arbs::jc::fmt("%s 송신 후 %llu회", what, static_cast<unsigned long long>(n));
+    };
+    return arbs::jc::fmt("ARBS-W: IF2 열기 후 분리까지 %lld ms(", static_cast<long long>(ms)) + part("GetInfo", getInfoWrites) + ", " +
+           part("0x53", motorRouteWrites) + ")";
+}
+
+std::string unbindPortsLine(int openPorts) {
+    if (openPorts <= 0) return "ARBS-W: 엔진 분리 뒤 이 프로세스에 열린 IF2 포트 0개";
+    return arbs::jc::fmt("ARBS-W 경고: 엔진 분리 뒤 이 프로세스에 열린 IF2 포트 %d개 - 엔진 스레드가 1.5초 안에 끝나지 않아 IF2 핸들이 남음"
+                         "(다음 연결 때 정리; 동글 재인식을 막을 수 있음, F2 진단)",
+                         openPorts);
+}
+
+void HidRecheckWatch::start(int64_t nowNs) {
+    std::lock_guard<std::mutex> g(mu_);
+    active_ = true;
+    firstDone_ = secondDone_ = false;
+    startNs_ = nowNs;
+}
+
+void HidRecheckWatch::stop() {
+    std::lock_guard<std::mutex> g(mu_);
+    active_ = false;
+}
+
+int64_t HidRecheckWatch::onTick(int64_t nowNs) {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!active_) return 0;
+    const int64_t ms = (nowNs - startNs_) / 1000000LL;
+    if (!secondDone_ && ms >= kSecondMs) {
+        firstDone_ = secondDone_ = true;
+        active_ = false;  // both checkpoints done
+        return kSecondMs;
+    }
+    if (!firstDone_ && ms >= kFirstMs) {
+        firstDone_ = true;
+        return kFirstMs;
+    }
+    return 0;
+}
+
+bool HidRecheckWatch::active() const {
+    std::lock_guard<std::mutex> g(mu_);
+    return active_;
+}
+
+std::string hidRecheckLine(int64_t checkpointMs, const std::string& hidSummary, int ownPorts) {
+    return arbs::jc::fmt("ARBS-W: IF2 분리 %lld초 뒤 SDL 에 37d7/2502 없음 - Windows ", static_cast<long long>(checkpointMs / 1000)) +
+           hidSummary + arbs::jc::fmt(", 이 프로세스 IF2 포트 %d개(F2 진단)", ownPorts);
+}
+
 }  // namespace arbsw

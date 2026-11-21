@@ -36,6 +36,7 @@ public:
     struct Stats {
         uint64_t writes = 0, writeTimeouts = 0, writeErrors = 0, reads = 0, readErrors = 0, ringDropped = 0;
         unsigned long lastError = 0;
+        uint64_t getInfoWrites = 0, motorRouteWrites = 0;  // B3b F2-D1: write attempts of command 0x01 / 0x53
     };
 
     // DEVICE SIGNAL: opens [c.path] (exclusive first, then shared). nullptr on failure, reason in [why].
@@ -43,21 +44,20 @@ public:
 
     // B2c 2-2: open policy with injectable pieces (unit tests use fakes or a temp file, never a device).
     //  OpenFn(path, exclusive) = one CreateFileW attempt (GENERIC_READ|WRITE, OVERLAPPED; share 0 or READ|WRITE):
-    //  returns the handle (nullptr on failure) and the Win32 error. SleepFn(ms) waits between exclusive retries.
+    //  returns the handle (nullptr on failure) and the Win32 error. SleepFn(ms) is kept as a test seam only: since B3b
+    //  the open never waits (kExclusiveRetries = 0, it is never called).
     struct OpenAttempt {
         void* handle = nullptr;    // HANDLE, nullptr = failed
         unsigned long error = 0;   // GetLastError() when failed
     };
     using OpenFn = std::function<OpenAttempt(const std::wstring& path, bool exclusive)>;
     using SleepFn = std::function<void(int ms)>;
-    // Error 32 (sharing violation) on the exclusive open -> up to kExclusiveRetries more exclusive tries kRetryDelayMs
-    // apart (<= 2 s on the main thread), then the shared open as before. The log always gets the number of IF2 ports
-    // this process still has open (0 = the other handle is not ARBS-W's own).
-    // B3 1-2 (ARBS-W B2d, provisional decision D-B3-2, planner has not ruled): 5 -> 20 tries (0.5 s -> 2 s), still
-    // blocking (a non-blocking open would make the bind result asynchronous and change the B2c hide/gate rules). The
-    // real blocked time (steady clock) is logged when at least one retry happened ("메인 스레드 정지 약 N ms").
-    static constexpr int kExclusiveRetries = 20;
-    static constexpr int kRetryDelayMs = 100;
+    // B3b F3 (ARBS-W b2e, provisional decision D-B3b-2, planner has not ruled; replaces D-B3-2): one exclusive try.
+    // Error 32 (sharing violation) -> the shared open at once: no retry, no wait, no later exclusive re-acquire (the
+    // 20 x 100 ms retry of b2d blocked the main thread ~2 s and in the field 3/3 still ended in error 32). The warning
+    // line is unchanged; the log always gets the number of IF2 ports this process still has open (0 = the other handle
+    // is not ARBS-W's own), and whenever error 32 happened the real blocked time ("메인 스레드 정지 약 N ms").
+    static constexpr int kExclusiveRetries = 0;
     static std::unique_ptr<WinHidPort> openWith(const HidCandidate& c, arbs::ILog& log, std::string* why, const OpenFn& openFn,
                                                 const SleepFn& sleepFn);
     // The real single attempt used by open() (CreateFileW). On a non-device path (temp file) it is safe for tests.
@@ -82,6 +82,8 @@ public:
     // B3 1-3 (ARBS-W B2d): called once, on the thread that first detects the detach (reader thread: ReadFile error 995
     // etc.; engine thread: write path). Set before Engine::attach. If the port is already detached when the listener is
     // set, it is called at once. Must not block (the bridge only records the time).
+    // B3b F2-D1 [잠정 D-B3b-3]: right after the "IF2 분리 감지" line the port also logs the time since it was opened
+    // (steady clock, constructor) and whether GetInfo / 0x53 had been sent (openToDetachLine).
     void setDisconnectListener(std::function<void()> fn);
     Stats stats() const;
 
@@ -97,6 +99,7 @@ private:
     uint16_t outLen_ = 0, inLen_ = 0;
     arbs::ILog& log_;
     bool exclusive_ = false;
+    int64_t openedNs_ = 0;  // B3b F2-D1: steady clock at construction
 
     std::vector<uint8_t> wbuf_;
     std::unique_ptr<unsigned char[]> wov_;  // OVERLAPPED storage (kept alive while a write may be pending)

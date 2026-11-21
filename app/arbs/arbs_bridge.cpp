@@ -75,7 +75,14 @@ struct Impl {
     arbsw::If2DetachWatch detach;     // B3 1-3 (log only, provisional decision D4)
     arbsw::PcmWait pcmWait;           // B3 1-4
     int apexArrivalsThisSession = 0;  // main thread only (B3 1-4: first arrival = "접속 후", later = "재연결 후")
+    arbsw::HidRecheckWatch hidRecheck;  // B3b F2-D3 (log only, provisional decision D-B3b-3)
 };
+
+// B3b F2-D3: the 5 s / 30 s HID re-check runs on the main thread. The SDL timer thread posts the existing
+// ARBS_SDL_CODE_APEX_CHECK event with a negative "generation" (= -checkpoint ms); binder generations are >= 1, so
+// onApexCheck can tell them apart without a new event code (session.cpp / gamepad.cpp unchanged).
+constexpr int kHidRecheckFirstCode = -static_cast<int>(arbsw::HidRecheckWatch::kFirstMs);
+constexpr int kHidRecheckSecondCode = -static_cast<int>(arbsw::HidRecheckWatch::kSecondMs);
 
 Impl* g_impl = nullptr;
 std::string g_earlyNotes;  // lines produced before the log file exists (portable fix, hints)
@@ -110,6 +117,15 @@ Uint32 rttTimerCallback(Uint32 interval, void*) {
     try {
         // B3 1-3 [잠정 D4]: IF2 detached >= 5 s and SDL has not removed the APEX -> one notice (no release in b2d)
         if (im->detach.onTick(im->clock.nowNs())) logLine(arbsw::detachNoticeLine());
+        // B3b F2-D3 [잠정 D-B3b-3]: checkpoint due -> main thread does the SDL check + HID list (one event each)
+        const int64_t checkpoint = im->hidRecheck.onTick(im->clock.nowNs());
+        if (checkpoint > 0) {
+            SDL_Event ev = {};
+            ev.type = SDL_USEREVENT;
+            ev.user.code = ARBS_SDL_CODE_APEX_CHECK;
+            ev.user.data1 = reinterpret_cast<void*>(static_cast<intptr_t>(-checkpoint));
+            SDL_PushEvent(&ev);
+        }
         uint32_t rtt = 0, var = 0;
         // common-c: try-lock on the ENet mutex + cached values; false until the first RTT estimate exists.
         if (LiGetEstimatedRttInfo(&rtt, &var)) {
@@ -214,6 +230,18 @@ void unbindEngine(const char* reason) {
     }
     logLine(arbs::jc::fmt("ARBS-W: 엔진 분리 완료(%s, %lldms)", reason,
                           static_cast<long long>((g_impl->clock.nowNs() - t0) / 1000000LL)));
+    // B3b F2-D2 [잠정 D-B3b-3]: an engine thread that missed the 1.5 s join keeps its IF2 handle (F2 hypothesis H1)
+    logLine(arbsw::unbindPortsLine(arbsw::WinHidPort::openCount()));
+}
+
+// B3b F2-D3 [잠정 D-B3b-3] (main thread): [checkpointMs] after an IF2 detach. SDL still lists a 37d7/2502 device ->
+// no line (not "unseen"). Otherwise one Windows HID list summary (enumerateApexIf2: access-0 open + close per
+// pre-filtered APEX path only, same as every bind) -> tells a Windows-level miss from an SDL-level miss.
+void hidRecheck(int64_t checkpointMs) {
+    if (sdlHasExactDevice()) return;
+    std::string diag;
+    arbsw::enumerateApexIf2(&diag);
+    logLine(arbsw::hidRecheckLine(checkpointMs, diag, arbsw::WinHidPort::openCount()));
 }
 
 void logJoystickList();
@@ -253,8 +281,12 @@ bool bindTo(int js, int index, arbsw::ApexMatch kind, If2Scan& s) {
     }
     // B3 1-3: the port reports its detach (ReadFile error 995 etc.) once; stale generations are ignored.
     const int detachGen = g_impl->detach.arm();
+    g_impl->hidRecheck.stop();  // B3b F2-D3: the dongle is back and bound -> no re-check for the old detach
     port->setDisconnectListener([detachGen] {
-        if (g_impl != nullptr) g_impl->detach.onDetach(detachGen, g_impl->clock.nowNs());
+        if (g_impl == nullptr) return;
+        const int64_t now = g_impl->clock.nowNs();
+        // B3b F2-D3: the first detach of the current port starts the 5 s / 30 s re-checks (stale ports do not)
+        if (g_impl->detach.onDetach(detachGen, now)) g_impl->hidRecheck.start(now);
     });
     g_impl->engine->attach(std::move(port));
     g_impl->engine->setControllerNumber(index);
@@ -490,6 +522,7 @@ void ArbsBridge::onStreamEnd(const char* reason) {
         cancelPcmWait(reason);  // B3 1-4
         g_impl->apexArrivalsThisSession = 0;
         g_impl->detach.disarm();  // B3 1-3
+        g_impl->hidRecheck.stop();  // B3b F2-D3
         arbs::Engine& e = *g_impl->engine;
         e.onSessionEnd(reason);  // stop sequence via the engine thread (<= 0.6 s) + session summary
         if (g_impl->minimizedPause.exchange(false)) e.onResume();
@@ -585,7 +618,15 @@ ArbsBind ArbsBridge::onGamepadAdded(int playerIndex, int joystickId, uint16_t sd
 }
 
 ArbsBind ArbsBridge::onApexCheck(int generation) {
-    if (g_impl == nullptr || generation != g_impl->binder.generation()) return ArbsBind();
+    if (g_impl == nullptr) return ArbsBind();
+    if (generation == kHidRecheckFirstCode || generation == kHidRecheckSecondCode) {  // B3b F2-D3 (not a binder check)
+        try {
+            hidRecheck(-static_cast<int64_t>(generation));
+        } catch (...) {
+        }
+        return ArbsBind();
+    }
+    if (generation != g_impl->binder.generation()) return ArbsBind();
     try {
         g_impl->checkTimer = 0;  // one-shot timer has fired
         If2Scan s;
