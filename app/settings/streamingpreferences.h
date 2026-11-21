@@ -173,6 +173,8 @@ public:
     Q_PROPERTY(bool arbsVerboseLog MEMBER arbsVerboseLog NOTIFY arbsChanged)
     // B2b 2-2: APEX first numbering (default on)
     Q_PROPERTY(bool arbsApexFirst MEMBER arbsApexFirst NOTIFY arbsChanged)
+    // B2c 2-1: APEX only - hide other gamepads from the host while the APEX is connected (default on)
+    Q_PROPERTY(bool arbsApexOnly MEMBER arbsApexOnly NOTIFY arbsChanged)
     Q_PROPERTY(bool checkForUpdates MEMBER checkForUpdates NOTIFY checkForUpdatesChanged)
 
     // [Restore ASB defaults]: resets the ARBS items above (not checkForUpdates) and saves.
@@ -235,6 +237,7 @@ public:
     int arbsTriggerStrength;
     bool arbsVerboseLog;
     bool arbsApexFirst;
+    bool arbsApexOnly;
     bool checkForUpdates;
 
 signals:

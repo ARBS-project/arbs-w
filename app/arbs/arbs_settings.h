@@ -20,6 +20,7 @@ struct ArbsSettings {
     int triggerStrength = 100;  // %. list_arbs_trigger_strength
     bool verbose = false;       // keep 1 s lines after 20 MB. checkbox_arbs_verbose_log
     bool apexFirst = true;      // B2b 2-2: APEX = controller #1 (number 0), other pads after it. checkbox_arbs_apex_first
+    bool apexOnly = true;       // B2c 2-1: APEX only - other pads hidden from the host while the APEX is (or may be) bound
 };
 
 namespace settings {

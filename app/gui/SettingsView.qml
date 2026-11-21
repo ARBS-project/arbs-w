@@ -1566,6 +1566,7 @@ Flickable {
                     arbsTriggerCheck.checked = StreamingPreferences.arbsTrigger
                     arbsVerboseCheck.checked = StreamingPreferences.arbsVerboseLog
                     arbsApexFirstCheck.checked = StreamingPreferences.arbsApexFirst
+                    arbsApexOnlyCheck.checked = StreamingPreferences.arbsApexOnly
                 }
 
                 Label {
@@ -1652,11 +1653,25 @@ Flickable {
                                {text: "80%", val: 80}, {text: "100% (default)", val: 100} ]
                 }
 
+                // B2c 2-1: independent of "Force gamepad #1 always connected"
+                CheckBox {
+                    id: arbsApexOnlyCheck
+                    width: parent.width
+                    text: "APEX only: hide other gamepads from the host while the APEX is connected (default on)"
+                    font.pointSize: 12
+                    checked: StreamingPreferences.arbsApexOnly
+                    onCheckedChanged: {
+                        StreamingPreferences.arbsApexOnly = checked
+                    }
+                }
+
                 CheckBox {
                     id: arbsApexFirstCheck
                     width: parent.width
-                    text: "APEX first: report the APEX as gamepad #1 (player 1), other gamepads after it (default on)"
+                    text: "APEX first: report the APEX as gamepad #1 (player 1), other gamepads after it (default on, used when APEX only is off)"
                     font.pointSize: 12
+                    // APEX only on = the APEX is always gamepad #1 and the others are hidden, so this choice is not used
+                    enabled: !arbsApexOnlyCheck.checked
                     checked: StreamingPreferences.arbsApexFirst
                     onCheckedChanged: {
                         StreamingPreferences.arbsApexFirst = checked

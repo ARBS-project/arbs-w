@@ -72,6 +72,7 @@
 #define SER_ARBS_TRIGGER_STRENGTH "arbstriggerstrength"
 #define SER_ARBS_VERBOSE "arbsverboselog"
 #define SER_ARBS_APEX_FIRST "arbsapexfirst"
+#define SER_ARBS_APEX_ONLY "arbsapexonly"
 #define SER_CHECKFORUPDATES "checkforupdates"
 
 #define CURRENT_DEFAULT_VER 2
@@ -208,6 +209,7 @@ void StreamingPreferences::reload()
         s.triggerStrength = settings.value(SER_ARBS_TRIGGER_STRENGTH, d.triggerStrength).toInt();
         s.verbose = settings.value(SER_ARBS_VERBOSE, d.verbose).toBool();
         s.apexFirst = settings.value(SER_ARBS_APEX_FIRST, d.apexFirst).toBool();
+        s.apexOnly = settings.value(SER_ARBS_APEX_ONLY, d.apexOnly).toBool();
         setArbsSettings(arbsw::settings::normalize(s));
     }
     checkForUpdates = settings.value(SER_CHECKFORUPDATES, false).toBool();
@@ -413,6 +415,7 @@ void StreamingPreferences::save()
     settings.setValue(SER_ARBS_TRIGGER_STRENGTH, arbsTriggerStrength);
     settings.setValue(SER_ARBS_VERBOSE, arbsVerboseLog);
     settings.setValue(SER_ARBS_APEX_FIRST, arbsApexFirst);
+    settings.setValue(SER_ARBS_APEX_ONLY, arbsApexOnly);
     settings.setValue(SER_CHECKFORUPDATES, checkForUpdates);
 }
 
@@ -429,6 +432,7 @@ void StreamingPreferences::setArbsSettings(const arbsw::ArbsSettings& s)
     arbsTriggerStrength = s.triggerStrength;
     arbsVerboseLog = s.verbose;
     arbsApexFirst = s.apexFirst;
+    arbsApexOnly = s.apexOnly;
 }
 
 void StreamingPreferences::restoreArbsDefaults()

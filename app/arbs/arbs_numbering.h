@@ -73,6 +73,33 @@ std::vector<HostStep> planArrival(const HostLedger& l, bool multi, bool apexFirs
                                   uint16_t mask);
 // A pad that stays connected loses the APEX binding (re-bind to another pad).
 //  multi : number holds an APEX arrival -> Remove(index) + normal Arrival(index).  single: nothing (0 stays PS/PCM).
+//  (APEX-only mode does not use this: the pad that lost the binding is hidden -> planHide, analysis B2c 5 2-1.)
 std::vector<HostStep> planUnbind(const HostLedger& l, bool multi, int index, uint16_t mask);
+
+// ---- B2c 2-1: APEX-only mode (setting arbsApexOnly, default on; docs/analysis/B2c.md section 5 2-1) ----
+// While the APEX is bound, or a 37d7/2502 game controller is in the SDL list and has not been handled yet (it may still
+// bind), every other pad is hidden from the host: no arrival, input, motion, touch or battery, no mask bit (ARBS-A
+// ControllerHandler.java:537-544, 3169-3173). A 37d7/2502 pad that was handled and did not bind (IF2 0/2, open failure)
+// is no longer "pending" -> the others are shown again (normal Moonlight). Independent of Force #1 (single mode).
+//  [exactPending] = analysis "exactInSdlList && !exactBindFailed".
+bool hideOther(bool apexOnly, bool padIsApex, bool apexBound, bool exactPending);
+// APEX-only on = APEX first numbering whatever the apexFirst setting says (planSlot / planArrival argument).
+inline bool apexFirstEffective(bool apexFirst, bool apexOnly) { return apexFirst || apexOnly; }
+// Start mask (getAttachedGamepadMask, also the launch gcmap): multi + APEX-only + a 37d7/2502 device in the SDL list ->
+// only the APEX bit 0x1 (the other pads will be hidden). Anything else -> [upstreamMask] unchanged.
+uint16_t apexOnlyStartMask(bool multi, bool apexOnly, bool exactInSdlList, uint16_t upstreamMask);
+// Hide a pad the host may already know about.
+//  multi : number [index] was created by our arrival -> Remove(index, mask without the bit); otherwise nothing.
+//  single: number 0 was created by a normal arrival -> Remove(0, mask 0) (the APEX arrival then creates 0 as PS/PCM);
+//          0 already holds the APEX arrival -> nothing.
+std::vector<HostStep> planHide(const HostLedger& l, bool multi, int index, uint16_t mask);
+// Show a hidden pad again (APEX gone or never bound): its normal arrival, = planArrival(asApex = false).
+//  multi: Arrival(index, mask | bit) (Remove first if the number is somehow allocated). single: Arrival(0, mask).
+std::vector<HostStep> planUnhide(const HostLedger& l, bool multi, int index, int joystickId, uint16_t mask);
+// Provisional decision D1 (planner has not ruled; analysis recommendation): when the APEX leaves and slot 0 is free,
+// the hidden pad in the lowest slot moves to slot 0 before it is shown (1P-only games; its removal MC and arrival then
+// share channel 0). [occupiedAfter]/[hidden] have [n] entries (state after the APEX slot is cleared).
+// Returns that slot, or -1 (slot 0 still occupied / no hidden pad).
+int pickShowMover(const bool* occupiedAfter, const bool* hidden, int n);
 
 }  // namespace arbsw

@@ -7,13 +7,15 @@
 //           CancelIoEx, 500 ms cancel grace -> "no response" = Disconnected
 //   read  : dedicated thread, overlapped ReadFile loop -> ring (64) -> readFrame() waits on a condition variable
 //   MMCSS : onEngineThreadStart = "Pro Audio" -> "Games" -> SetThreadPriority(HIGHEST); reverted on end
-// Device API calls live only in enumerateApexIf2() and WinHidPort::open(). Unit tests never call them; they drive the
-// same port class through WinHidPort(HANDLE, ...) on a local named pipe (app/arbs/tests).
+// Device API calls live only in enumerateApexIf2() and WinHidPort::open() (-> createFileAttempt). Unit tests never call
+// them on a device; they drive the same port class through WinHidPort(HANDLE, ...) on a local named pipe, and the B2c
+// open policy (openWith) through fakes or createFileAttempt on a temp file (app/arbs/tests).
 #pragma once
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -38,6 +40,27 @@ public:
 
     // DEVICE SIGNAL: opens [c.path] (exclusive first, then shared). nullptr on failure, reason in [why].
     static std::unique_ptr<WinHidPort> open(const HidCandidate& c, arbs::ILog& log, std::string* why);
+
+    // B2c 2-2: open policy with injectable pieces (unit tests use fakes or a temp file, never a device).
+    //  OpenFn(path, exclusive) = one CreateFileW attempt (GENERIC_READ|WRITE, OVERLAPPED; share 0 or READ|WRITE):
+    //  returns the handle (nullptr on failure) and the Win32 error. SleepFn(ms) waits between exclusive retries.
+    struct OpenAttempt {
+        void* handle = nullptr;    // HANDLE, nullptr = failed
+        unsigned long error = 0;   // GetLastError() when failed
+    };
+    using OpenFn = std::function<OpenAttempt(const std::wstring& path, bool exclusive)>;
+    using SleepFn = std::function<void(int ms)>;
+    // Error 32 (sharing violation) on the exclusive open -> up to kExclusiveRetries more exclusive tries kRetryDelayMs
+    // apart (<= 0.5 s on the main thread), then the shared open as before. The log always gets the number of IF2 ports
+    // this process still has open (0 = the other handle is not ARBS-W's own).
+    static constexpr int kExclusiveRetries = 5;
+    static constexpr int kRetryDelayMs = 100;
+    static std::unique_ptr<WinHidPort> openWith(const HidCandidate& c, arbs::ILog& log, std::string* why, const OpenFn& openFn,
+                                                const SleepFn& sleepFn);
+    // The real single attempt used by open() (CreateFileW). On a non-device path (temp file) it is safe for tests.
+    static OpenAttempt createFileAttempt(const std::wstring& path, bool exclusive);
+    // Number of WinHidPort objects alive in this process (constructor +1, destructor -1 after CloseHandle).
+    static int openCount();
 
     // Takes ownership of an overlapped handle (used by open() and by the pipe-based unit test).
     WinHidPort(void* overlappedHandle, uint16_t outLen, uint16_t inLen, arbs::ILog& log, bool exclusive);
@@ -84,6 +107,8 @@ private:
 
     void* mmcss_ = nullptr;  // HANDLE from AvSetMmThreadCharacteristicsW
     bool prioritySet_ = false;
+
+    static std::atomic<int> s_open_;  // B2c 2-2: ports alive in this process
 };
 
 }  // namespace arbsw

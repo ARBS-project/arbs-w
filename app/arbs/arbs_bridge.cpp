@@ -197,13 +197,26 @@ void unbindEngine(const char* reason) {
                           static_cast<long long>((g_impl->clock.nowNs() - t0) / 1000000LL)));
 }
 
+void logJoystickList();
+
 // IF2 open + attach + controller number + trigger/input seeds (B2b 2-3).
 bool bindTo(int js, int index, arbsw::ApexMatch kind, If2Scan& s) {
+    // B2c 2-2: SDL joystick list again at every bind (after a dongle replug it shows whether SDL HIDAPI took IF2)
+    logJoystickList();
     scanIf2(s);
     if (s.pick.count != 1 || s.pick.index < 0) {
         logLine("ARBS-W: APEX 연결 취소 - IF2 " + std::to_string(s.pick.count) + "개(정확히 1개일 때만) -> 일반 패드");
         g_impl->binder.onBindFailed(js);
         return false;
+    }
+    // B2c 2-2 (analysis gap 1): the old port must be gone before the new open. Core attach() releases the previous port
+    // only after we have opened the new one, and after a detach that took > 1.5 s Core still holds it. Release it here
+    // first. (Core's own order - port released before the late engine thread is joined - is analysis gap 2, record only.)
+    const int before = arbsw::WinHidPort::openCount();
+    if (before > 0) {
+        logLine(arbs::jc::fmt("ARBS-W: 이 프로세스에 이전 IF2 포트 %d개가 아직 열려 있음 - 새로 열기 전에 엔진 분리로 닫음", before));
+        g_impl->engine->detach("새 IF2 열기 전 이전 포트 정리");
+        logLine(arbs::jc::fmt("ARBS-W: 이전 IF2 포트 정리 후 열린 포트 %d개", arbsw::WinHidPort::openCount()));
     }
     std::string why;
     std::unique_ptr<arbsw::WinHidPort> port = arbsw::WinHidPort::open(s.list[static_cast<size_t>(s.pick.index)], *g_impl->log, &why);
@@ -356,7 +369,7 @@ void ArbsBridge::initEarly(const QString& logDir) {
     const QStringList old = dir.entryList(QStringList("ARBS-*.log"), QDir::Files, QDir::Time);
     for (int i = 10; i < old.size(); i++) QFile(dir.filePath(old.at(i))).remove();
 
-    logLine(std::string("ARBS-W B2b 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
+    logLine(std::string("ARBS-W B2c 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
     logLine(std::string("ARBS-W: 로그 폴더 = ") + (QFileInfo::exists(dir.filePath("portable.dat")) ? "포터블 폴더(exe 폴더)" : "임시 폴더"));
     size_t start = 0;
     while (start < g_earlyNotes.size()) {
@@ -547,8 +560,17 @@ void ArbsBridge::onGamepadIndexChanged(int joystickId, int playerIndex) {
     if (g_impl == nullptr) return;
     g_impl->binder.onIndexChanged(joystickId, playerIndex);
     if (g_impl->apexJs == joystickId) {
-        g_impl->apexIndex = playerIndex;
+        const int old = g_impl->apexIndex.exchange(playerIndex);
         g_impl->engine->setControllerNumber(playerIndex);
+        // B2c 2-3 (verify B2b question #6): the APEX arrival for the new number follows this call; without this the gate
+        // would drop it as "already sent" and the host would never create the new number as PS/PCM.
+        if (arbsw::reopenGateOnIndexChange(g_impl->gate, old, playerIndex)) {
+            {
+                std::lock_guard<std::mutex> g(g_impl->pendingMu);
+                if (g_impl->pending.valid) g_impl->pending.index = playerIndex;
+            }
+            logLine(arbs::jc::fmt("ARBS-W: APEX 번호 %d -> %d 변경 - 도착 게이트 다시 열기(새 번호로 도착 보고)", old, playerIndex));
+        }
     }
 }
 
@@ -557,6 +579,19 @@ bool ArbsBridge::isExactPad(uint16_t sdlVid, uint16_t sdlPid) { return arbsw::is
 bool ArbsBridge::sdlListHasExact() { return sdlHasExactDevice(); }
 
 bool ArbsBridge::apexBound() { return g_impl != nullptr && g_impl->apexJs != kNoJoystick; }
+
+bool ArbsBridge::exactPending() {
+    if (g_impl == nullptr) return false;
+    const int count = SDL_NumJoysticks();
+    for (int i = 0; i < count; i++) {
+        if (!arbsw::isExactVidPid(SDL_JoystickGetDeviceVendor(i), SDL_JoystickGetDeviceProduct(i))) continue;
+        // only game controllers get a DEVICEADDED (gamepad.cpp); a plain joystick would stay "pending" forever
+        if (!SDL_IsGameController(i)) continue;
+        const SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(i);
+        if (id >= 0 && !g_impl->binder.seen(static_cast<int>(id))) return true;
+    }
+    return false;
+}
 
 void ArbsBridge::log(const char* line) {
     if (line != nullptr) logLine(line);

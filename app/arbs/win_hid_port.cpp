@@ -92,36 +92,76 @@ std::vector<HidCandidate> enumerateApexIf2(std::string* diag) {
 }
 
 // ------------------------------------------------------------------------------------------------ open
+std::atomic<int> WinHidPort::s_open_{0};
+
+int WinHidPort::openCount() { return s_open_.load(); }
+
+WinHidPort::OpenAttempt WinHidPort::createFileAttempt(const std::wstring& path, bool exclusive) {
+    OpenAttempt a;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, exclusive ? 0 : (FILE_SHARE_READ | FILE_SHARE_WRITE), nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        a.error = GetLastError();
+        return a;
+    }
+    a.handle = h;
+    return a;
+}
+
 std::unique_ptr<WinHidPort> WinHidPort::open(const HidCandidate& c, arbs::ILog& log, std::string* why) {
+    return openWith(c, log, why, &WinHidPort::createFileAttempt, [](int ms) { Sleep(static_cast<DWORD>(ms)); });
+}
+
+std::unique_ptr<WinHidPort> WinHidPort::openWith(const HidCandidate& c, arbs::ILog& log, std::string* why, const OpenFn& openFn,
+                                                 const SleepFn& sleepFn) {
     if (!outputLenUsable(c.outLen)) {
         if (why) *why = "IF2 출력 리포트 길이 " + std::to_string(c.outLen) + " < 33 - 열지 않음";
         return nullptr;
     }
+    // B2c 2-2: own ports still open in this process (0 = an error 32 below comes from another handle, not ARBS-W's)
+    log.info("ARBS-W: IF2 열기 - 이 프로세스에 이미 열린 IF2 포트 " + std::to_string(openCount()) + "개");
     // Exclusive first (design 4-4): keeps Space Station / XHaptics / SDL from writing to IF2 while ARBS owns it.
     bool exclusive = true;
-    HANDLE h = CreateFileW(c.path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        const DWORD e = GetLastError();
+    OpenAttempt a = openFn(c.path, true);
+    // B2c 2-2: a sharing violation right after a dongle replug may be another handle opened only for a moment ->
+    // bounded exclusive retry (kExclusiveRetries x kRetryDelayMs) before falling back to the shared open.
+    int retries = 0;
+    while (a.handle == nullptr && a.error == ERROR_SHARING_VIOLATION && retries < kExclusiveRetries) {
+        if (retries == 0) {
+            log.info(arbs::jc::fmt("ARBS-W: IF2 배타 열기 오류 32(공유 위반) - %dms 간격으로 최대 %d회 다시 시도", kRetryDelayMs,
+                                   kExclusiveRetries));
+        }
+        sleepFn(kRetryDelayMs);
+        retries++;
+        a = openFn(c.path, true);
+    }
+    if (a.handle != nullptr && retries > 0) {
+        log.info(arbs::jc::fmt("ARBS-W: IF2 배타 열기 성공(재시도 %d회, 약 %dms 뒤)", retries, retries * kRetryDelayMs));
+    }
+    if (a.handle == nullptr) {
+        const unsigned long e = a.error;
         if (e == ERROR_SHARING_VIOLATION) {
             log.info("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
-                     "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요");
+                     "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요" +
+                     arbs::jc::fmt(" (배타 재시도 %d회 모두 오류 32, 이 프로세스에 열린 IF2 포트 %d개 - 0개면 ARBS-W 자신의 핸들이 아님)",
+                                   retries, openCount()));
         } else {
             log.info("ARBS-W: IF2 배타 열기 실패(오류 " + winErr(e) + ") -> 공유 모드로 다시 시도");
         }
         exclusive = false;
-        h = CreateFileW(c.path.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
-                        FILE_FLAG_OVERLAPPED, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
-            if (why) *why = "IF2 열기 실패(공유 모드도 실패, 오류 " + winErr(GetLastError()) + ")";
+        a = openFn(c.path, false);
+        if (a.handle == nullptr) {
+            if (why) *why = "IF2 열기 실패(공유 모드도 실패, 오류 " + winErr(a.error) + ")";
             return nullptr;
         }
     }
-    return std::unique_ptr<WinHidPort>(new WinHidPort(h, c.outLen, c.inLen, log, exclusive));
+    return std::unique_ptr<WinHidPort>(new WinHidPort(a.handle, c.outLen, c.inLen, log, exclusive));
 }
 
 // ------------------------------------------------------------------------------------------------ port
 WinHidPort::WinHidPort(void* handle, uint16_t outLen, uint16_t inLen, arbs::ILog& log, bool exclusive)
     : h_(handle), outLen_(outLen), inLen_(inLen), log_(log), exclusive_(exclusive) {
+    s_open_.fetch_add(1);
     writeEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     readEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     stopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -145,6 +185,7 @@ WinHidPort::~WinHidPort() {
     if (writeEvent_) CloseHandle(static_cast<HANDLE>(writeEvent_));
     if (readEvent_) CloseHandle(static_cast<HANDLE>(readEvent_));
     if (stopEvent_) CloseHandle(static_cast<HANDLE>(stopEvent_));
+    s_open_.fetch_sub(1);  // B2c 2-2: handle, reader thread, pending I/O and events are all gone at this point
     const Stats s = stats();
     log_.info("ARBS-W: IF2 닫힘 - 쓰기 " + std::to_string(s.writes) + " 시간초과 " + std::to_string(s.writeTimeouts) + " 오류 " +
               std::to_string(s.writeErrors) + ", 읽기 " + std::to_string(s.reads) + " 오류 " + std::to_string(s.readErrors) + " 링폐기 " +

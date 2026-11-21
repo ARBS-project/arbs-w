@@ -108,6 +108,9 @@ public:
     bool checkNeedsIf2() const;          // a check could bind (nothing bound, one candidate)
     size_t padCount() const { return pads_.size(); }
     int indexOf(int js) const;           // -1 if unknown
+    // B2c 2-1: onPadAdded() was called for [js] in this session (bound or not). A 37d7/2502 game controller in the SDL
+    // list that was never seen may still bind -> APEX-only mode keeps the other pads hidden until it is handled.
+    bool seen(int js) const;
 
 private:
     struct Pad {
@@ -119,6 +122,7 @@ private:
     int openCount(bool exact) const;
 
     std::vector<Pad> pads_;
+    std::vector<int> seen_;  // B2c: every joystick id handed to onPadAdded() since reset()
     int boundJs_ = kNone;
     ApexMatch boundKind_ = ApexMatch::None;
     int64_t firstAddMs_ = -1;
@@ -205,6 +209,11 @@ private:
     mutable std::mutex mu_;
     bool live_ = false, pending_ = false, sent_ = false;
 };
+
+// B2c 2-3 (verify B2b question #6): the bound APEX moved to another controller number (slot move) -> the arrival on the
+// new number must not be dropped as "already sent". Re-opens [g] (onApexRemoved) when [oldIndex] >= 0 and the number
+// really changes; returns true then. The ArrivalGate rules themselves are unchanged.
+bool reopenGateOnIndexChange(ArrivalGate& g, int oldIndex, int newIndex);
 
 // ---- settings -> Core engine config ----
 arbs::Engine::Config toEngineConfig(const ArbsSettings& s);

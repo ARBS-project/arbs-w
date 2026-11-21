@@ -161,6 +161,11 @@ SdlInputHandler::SdlInputHandler(StreamingPreferences& prefs, int streamWidth, i
     ArbsBridge::log(m_ArbsApexFirst ? (m_MultiController ? "ARBS-W: APEX 우선 번호 켬(멀티 컨트롤러: APEX = 0번, 다른 패드는 1번부터)"
                                                          : "ARBS-W: APEX 우선 번호 켬(단일 컨트롤러 모드: 모두 0번, APEX 가 아닌 패드의 도착 보고 생략)")
                                     : "ARBS-W: APEX 우선 번호 끔(번호·도착 순서는 Moonlight 기본)");
+    // B2c 2-1: APEX only (setting, default on, independent of "Force gamepad #1 always connected")
+    m_ArbsApexOnly = prefs.arbsApexOnly;
+    ArbsBridge::log(m_ArbsApexOnly ? "ARBS-W: APEX 단독 켬 - APEX 가 연결되어 있는(또는 연결될) 동안 다른 패드는 호스트에 보내지 않음"
+                                     "(도착·입력·모션·터치·배터리), APEX = 0번(APEX 우선 번호 설정은 쓰지 않음)"
+                                   : "ARBS-W: APEX 단독 끔 - 다른 패드도 호스트에 보냄(B2b 동작, APEX 우선 번호 설정을 따름)");
 #endif
 
     m_OldIgnoreDevices = SDL_GetHint(SDL_HINT_GAMECONTROLLER_IGNORE_DEVICES);

@@ -62,6 +62,13 @@ void SdlInputHandler::sendGamepadState(GamepadState* state)
 {
     SDL_assert(m_GamepadMask == 0x1 || m_MultiController);
 
+#ifdef ARBS_W
+    if (state->arbsHidden) {
+        // ARBS-W B2c 2-1: APEX-only mode - a hidden pad sends nothing to the host (local state is kept)
+        return;
+    }
+#endif
+
     // Handle Select+PS as the clickpad button on PS4/5 controllers without a clickpad mapping
     int buttons = state->buttons;
     if (state->clickpadButtonEmulationEnabled) {
@@ -85,6 +92,12 @@ void SdlInputHandler::sendGamepadState(GamepadState* state)
     // When in single controller mode, merge all gamepad state together
     if (!m_MultiController) {
         for (int i = 0; i < MAX_GAMEPADS; i++) {
+#ifdef ARBS_W
+            if (m_GamepadState[i].arbsHidden) {
+                // ARBS-W B2c 2-1: a hidden pad's input is not merged into number 0 either
+                continue;
+            }
+#endif
             if (m_GamepadState[i].index == state->index) {
                 buttons |= m_GamepadState[i].buttons;
                 if (lt < m_GamepadState[i].lt) {
@@ -311,6 +324,11 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
     if (ArbsBridge::isApexJoystick(event->which)) {
         ArbsBridge::onApexInput();
     }
+    // ARBS-W B2c provisional decision D2 (planner has not ruled): a hidden pad never starts mouse emulation, because its
+    // mouse/keyboard events would reach the host as input. The quit combo stays usable (local SDL_QUIT only).
+    const bool gamepadMouse = m_GamepadMouse && !state->arbsHidden;
+#else
+    const bool gamepadMouse = m_GamepadMouse;
 #endif
 
     if (m_SwapFaceButtons) {
@@ -379,7 +397,7 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                                 "Mouse emulation deactivated");
                     Session::get()->notifyMouseEmulationMode(false);
                 }
-                else if (m_GamepadMouse) {
+                else if (gamepadMouse) {
                     // Send the start button up event to the host, since we won't do it below
                     sendGamepadState(state);
 
@@ -422,6 +440,9 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
         SDL_PushEvent(&event);
 
         // Clear buttons down on this gamepad
+#ifdef ARBS_W
+        if (!state->arbsHidden)  // B2c 2-1: a hidden pad's quit combo acts locally only
+#endif
         LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                    0, 0, 0, 0, 0, 0, 0);
         return;
@@ -437,6 +458,9 @@ void SdlInputHandler::handleControllerButtonEvent(SDL_ControllerButtonEvent* eve
                                                             !Session::get()->getOverlayManager().isOverlayEnabled(Overlay::OverlayDebug));
 
         // Clear buttons down on this gamepad
+#ifdef ARBS_W
+        if (!state->arbsHidden)  // B2c 2-1: the overlay toggle is local; nothing goes to the host for a hidden pad
+#endif
         LiSendMultiControllerEvent(state->index, m_GamepadMask,
                                    0, 0, 0, 0, 0, 0, 0);
         return;
@@ -456,6 +480,11 @@ void SdlInputHandler::handleControllerSensorEvent(SDL_ControllerSensorEvent* eve
     if (state == NULL) {
         return;
     }
+#ifdef ARBS_W
+    if (state->arbsHidden) {
+        return;  // B2c 2-1: no motion from a hidden pad
+    }
+#endif
 
     switch (event->sensor) {
     case SDL_SENSOR_ACCEL:
@@ -491,6 +520,11 @@ void SdlInputHandler::handleControllerTouchpadEvent(SDL_ControllerTouchpadEvent*
     if (state == NULL) {
         return;
     }
+#ifdef ARBS_W
+    if (state->arbsHidden) {
+        return;  // B2c 2-1: no touch from a hidden pad
+    }
+#endif
 
     uint8_t eventType;
     switch (event->type) {
@@ -526,6 +560,9 @@ void SdlInputHandler::handleJoystickBatteryEvent(SDL_JoyBatteryEvent* event)
     if (state->arbsArrivalSkipped) {
         // Single mode + APEX first: this pad is not reported, its battery must not replace the APEX one on number 0
         return;
+    }
+    if (state->arbsHidden) {
+        return;  // B2c 2-1: no battery from a hidden pad
     }
 #endif
 
@@ -597,7 +634,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             const bool slot0Exact = occupied[0] &&
                     ArbsBridge::isExactPad(SDL_GameControllerGetVendor(m_GamepadState[0].controller),
                                            SDL_GameControllerGetProduct(m_GamepadState[0].controller));
-            const arbsw::SlotPlan plan = arbsw::planSlot(occupied, MAX_GAMEPADS, m_MultiController, m_ArbsApexFirst, slot0Exact,
+            // B2c 2-1: APEX-only on = APEX first numbering whatever the APEX first setting says
+            const arbsw::SlotPlan plan = arbsw::planSlot(occupied, MAX_GAMEPADS, m_MultiController,
+                                                         arbsw::apexFirstEffective(m_ArbsApexFirst, m_ArbsApexOnly), slot0Exact,
                                                          arbsPadExact, ArbsBridge::sdlListHasExact());
             i = plan.slot >= 0 ? plan.slot : MAX_GAMEPADS;
             arbsMoveTo = plan.moveTo;
@@ -715,6 +754,9 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         const ArbsBind arbsBind = ArbsBridge::onGamepadAdded(state->index, state->jsId, vendorId, productId);
         const bool arbsApex = arbsBind.boundJs == state->jsId;
         bool arbsSent = true;
+        // B2c 2-1: APEX-only mode - not the APEX while the APEX is bound or a 37d7/2502 pad is still pending -> hidden
+        state->arbsHidden = arbsw::hideOther(m_ArbsApexOnly, ArbsBridge::isApexJoystick(state->jsId), ArbsBridge::apexBound(),
+                                             ArbsBridge::exactPending());
 #endif
 
         // Add this gamepad to the gamepad mask
@@ -722,6 +764,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             // NB: Don't assert that it's unset here because we will already
             // have the mask set for initially attached gamepads to avoid confusing
             // apps running on the host.
+#ifdef ARBS_W
+            if (state->arbsHidden) {
+                // B2c 2-1: a hidden pad gets no mask bit (also cleared if the start mask had it)
+                m_GamepadMask &= ~(1 << state->index);
+            }
+            else
+#endif
             m_GamepadMask |= (1 << state->index);
         }
         else {
@@ -844,6 +893,17 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         // Host report order (B2b analysis 2-2 channel rule): the moved pad first (its new number, mask still holds 0),
         // then the pad that lost the APEX binding, then this pad (removal MC first if its number was already allocated).
         // The APEX arrival goes through the stream-live gate (once per attach); rc goes to the ARBS log.
+        // B2c 2-1 (APEX-only): first hide / show the other pads to match the new binding (hidden pads send nothing below).
+        if (m_ArbsApexOnly) {
+            if (state->arbsHidden) {
+                char line[200];
+                std::snprintf(line, sizeof(line),
+                              "ARBS-W: APEX 단독: 다른 패드 VID/PID %04x/%04x 숨김(번호 %d) - 호스트에 도착·입력·모션·터치·배터리를 보내지 않음",
+                              vendorId, productId, state->index);
+                ArbsBridge::log(line);
+            }
+            arbsSyncHidden(state);
+        }
         if (arbsMoveTo >= 0) {
             arbsSendArrival(&m_GamepadState[arbsMoveTo], ArbsBridge::isApexJoystick(m_GamepadState[arbsMoveTo].jsId));
         }
@@ -891,6 +951,17 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             // B2b 2-4: only the bound APEX detaches the engine (stop sequence, IF2 closed); a remaining 37D7/2502 pad
             // is bound at once (reported after this removal)
             const ArbsBind arbsBind = ArbsBridge::onGamepadRemoved(state->jsId);
+            if (state->arbsHidden) {
+                // B2c 2-1: the host never knew this pad - no mask change, no final MC packet, no ledger change
+                char line[160];
+                std::snprintf(line, sizeof(line), "ARBS-W: APEX 단독: 숨긴 패드 제거(SDL, 번호 %d) - 호스트 보고 없음", state->index);
+                ArbsBridge::log(line);
+                SDL_memset(state, 0, sizeof(*state));
+                arbsApplyBind(arbsBind);
+                return;
+            }
+            // B2c 2-1: pads shown again after this removal get their mask bits before the removal MC below (channel rule)
+            arbsPrepareShow(state);
 #endif
 
             // Remove this from the gamepad mask in MC-mode
@@ -948,13 +1019,28 @@ void SdlInputHandler::arbsApplyBind(const ArbsBind& bind)
         if (lost != nullptr) {
             // Multi-controller mode: its number held the APEX (PS/PCM) arrival -> removal MC + its own arrival again.
             // Single mode: nothing (number 0 stays PS/PCM for the new APEX).
-            arbsRunSteps(arbsw::planUnbind(m_ArbsHost, m_MultiController, lost->index, (uint16_t)m_GamepadMask), lost);
+            // B2c 2-1: APEX-only mode -> the pad that lost the binding is hidden instead (removal only, arbsSyncHidden).
+            if (!m_ArbsApexOnly) {
+                arbsRunSteps(arbsw::planUnbind(m_ArbsHost, m_MultiController, lost->index, (uint16_t)m_GamepadMask), lost);
+            }
             lost->clickpadButtonEmulationEnabled = arbsClickpadEmulation(lost, lost->arbsType == LI_CTYPE_PS);
         }
+    }
+    if (m_ArbsApexOnly) {
+        // B2c 2-1: binding changed (bind / unbind / bind failure) -> hide or show the other pads before the APEX arrival
+        arbsSyncHidden(nullptr);
     }
     if (bind.boundJs != ArbsBind::kNone) {
         GamepadState* apex = findStateForGamepad(bind.boundJs);
         if (apex != nullptr) {
+            if (apex->arbsHidden) {
+                // B2c 2-1: a hidden 37d7/2502 pad became the APEX (the bound one was removed) -> visible, mask bit back
+                // (already set before the removal MC by arbsPrepareShow in multi-controller mode)
+                apex->arbsHidden = false;
+                if (m_MultiController) {
+                    m_GamepadMask |= (1 << apex->index);
+                }
+            }
             // Already reported as a normal pad (delayed presumed match / re-bind after removal): report it as the APEX.
             arbsSendArrival(apex, true);
             apex->clickpadButtonEmulationEnabled = arbsClickpadEmulation(apex, true);
@@ -962,11 +1048,126 @@ void SdlInputHandler::arbsApplyBind(const ArbsBind& bind)
     }
 }
 
+void SdlInputHandler::arbsSyncHidden(GamepadState* skip)
+{
+    if (!m_ArbsApexOnly) {
+        return;
+    }
+    const bool bound = ArbsBridge::apexBound();
+    const bool pending = ArbsBridge::exactPending();
+    if (!arbsw::hideOther(true, false, bound, pending) && m_MultiController) {
+        // Provisional decision D1 (planner has not ruled, analysis recommendation): the APEX left and slot 0 is free ->
+        // the hidden pad in the lowest slot becomes number 0 (1P-only games; removal MC and arrival share channel 0)
+        bool occupied[MAX_GAMEPADS];
+        bool hidden[MAX_GAMEPADS];
+        for (int i = 0; i < MAX_GAMEPADS; i++) {
+            occupied[i] = m_GamepadState[i].controller != NULL;
+            hidden[i] = occupied[i] && m_GamepadState[i].arbsHidden && &m_GamepadState[i] != skip;
+        }
+        const int mover = arbsw::pickShowMover(occupied, hidden, MAX_GAMEPADS);
+        if (mover >= 0) {
+            arbsMovePad(mover, 0, false);
+        }
+    }
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        GamepadState* s = &m_GamepadState[i];
+        if (s->controller == NULL || s == skip) {
+            continue;
+        }
+        const bool apex = ArbsBridge::isApexJoystick(s->jsId);
+        const bool want = arbsw::hideOther(true, apex, bound, pending);
+        if (want && !s->arbsHidden) {
+            arbsHidePad(s);
+        }
+        else if (!want && s->arbsHidden && !apex) {
+            arbsShowPad(s);
+        }
+    }
+}
+
+void SdlInputHandler::arbsHidePad(GamepadState* state)
+{
+    // Provisional decision D2: a hidden pad sends nothing, mouse emulation included (its events would reach the host)
+    if (state->mouseEmulationTimer != 0) {
+        SDL_RemoveTimer(state->mouseEmulationTimer);
+        state->mouseEmulationTimer = 0;
+        Session::get()->notifyMouseEmulationMode(false);
+    }
+    if (m_MultiController) {
+        m_GamepadMask &= ~(1 << state->index);
+    }
+    char line[200];
+    for (const arbsw::HostStep& s : arbsw::planHide(m_ArbsHost, m_MultiController, state->index, (uint16_t)m_GamepadMask)) {
+        LiSendMultiControllerEvent(s.index, s.mask, 0, 0, 0, 0, 0, 0, 0);
+        std::snprintf(line, sizeof(line), "ARBS-W: APEX 단독: 호스트 보고 - 번호 %d 제거(MC 마스크 0x%x), 이 패드는 숨김", s.index, s.mask);
+        ArbsBridge::log(line);
+        m_ArbsHost.sent(s, state->jsId);
+    }
+    state->arbsHidden = true;
+    std::snprintf(line, sizeof(line),
+                  "ARBS-W: APEX 단독: 다른 패드 VID/PID %04x/%04x 숨김(번호 %d) - 호스트에 도착·입력·모션·터치·배터리를 보내지 않음",
+                  SDL_GameControllerGetVendor(state->controller), SDL_GameControllerGetProduct(state->controller), state->index);
+    ArbsBridge::log(line);
+}
+
+void SdlInputHandler::arbsShowPad(GamepadState* state)
+{
+    state->arbsHidden = false;
+    if (m_MultiController) {
+        m_GamepadMask |= (1 << state->index);
+    }
+    char line[200];
+    std::snprintf(line, sizeof(line), "ARBS-W: APEX 단독: APEX 없음(빠짐·연결 실패) - 숨긴 패드 VID/PID %04x/%04x 다시 보고(번호 %d)",
+                  SDL_GameControllerGetVendor(state->controller), SDL_GameControllerGetProduct(state->controller), state->index);
+    ArbsBridge::log(line);
+    arbsRunSteps(arbsw::planUnhide(m_ArbsHost, m_MultiController, state->index, state->jsId, (uint16_t)m_GamepadMask), state);
+    const SDL_JoystickPowerLevel powerLevel = SDL_JoystickCurrentPowerLevel(SDL_GameControllerGetJoystick(state->controller));
+    if (powerLevel != SDL_JOYSTICK_POWER_UNKNOWN) {
+        sendGamepadBatteryState(state, powerLevel);
+    }
+    // The local state was kept while hidden: send it once so the host starts from the real buttons/axes
+    sendGamepadState(state);
+}
+
+void SdlInputHandler::arbsPrepareShow(GamepadState* removed)
+{
+    if (!m_ArbsApexOnly || !m_MultiController || removed->arbsHidden) {
+        return;
+    }
+    // State after this removal (the bridge has already updated the binding)
+    const bool bound = ArbsBridge::apexBound();
+    const bool pending = ArbsBridge::exactPending();
+    const bool hiding = arbsw::hideOther(true, false, bound, pending);
+    bool occupied[MAX_GAMEPADS];
+    bool hidden[MAX_GAMEPADS];
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        occupied[i] = m_GamepadState[i].controller != NULL && &m_GamepadState[i] != removed;
+        hidden[i] = occupied[i] && m_GamepadState[i].arbsHidden;
+    }
+    const int mover = hiding ? -1 : arbsw::pickShowMover(occupied, hidden, MAX_GAMEPADS);
+    for (int i = 0; i < MAX_GAMEPADS; i++) {
+        if (!hidden[i] || i == mover) {
+            continue;
+        }
+        // Shown after the removal: all hidden pads (APEX gone), or only a hidden pad that just became the APEX. Their
+        // arrivals go on other channels than the removal MC, so that MC must already carry their bits. The pad moving to
+        // slot 0 (D1) is not added: its arrival shares channel 0 with the removal MC, which must free number 0.
+        if (!hiding || ArbsBridge::isApexJoystick(m_GamepadState[i].jsId)) {
+            m_GamepadMask |= (1 << m_GamepadState[i].index);
+        }
+    }
+}
+
 bool SdlInputHandler::arbsSendArrival(GamepadState* state, bool asApex)
 {
+    if (state->arbsHidden) {
+        return false;  // B2c 2-1: APEX-only mode - nothing goes to the host for a hidden pad
+    }
     const uint16_t vid = SDL_GameControllerGetVendor(state->controller);
     const uint16_t pid = SDL_GameControllerGetProduct(state->controller);
-    if (arbsw::skipArrivalSingle(m_MultiController, m_ArbsApexFirst, ArbsBridge::isExactPad(vid, pid), asApex,
+    // B2c 2-1: with APEX-only on, hiding replaces the B2b single-mode arrival skip (a visible pad is always reported)
+    if (!m_ArbsApexOnly &&
+        arbsw::skipArrivalSingle(m_MultiController, m_ArbsApexFirst, ArbsBridge::isExactPad(vid, pid), asApex,
                                  ArbsBridge::apexBound(), ArbsBridge::sdlListHasExact())) {
         // Risk K1: the host keeps the first arrival of number 0, so it must be the APEX (PS/PCM) one.
         state->arbsArrivalSkipped = true;
@@ -978,8 +1179,8 @@ bool SdlInputHandler::arbsSendArrival(GamepadState* state, bool asApex)
         return false;
     }
     state->arbsArrivalSkipped = false;
-    arbsRunSteps(arbsw::planArrival(m_ArbsHost, m_MultiController, m_ArbsApexFirst, state->index, asApex, state->jsId,
-                                    (uint16_t)m_GamepadMask),
+    arbsRunSteps(arbsw::planArrival(m_ArbsHost, m_MultiController, arbsw::apexFirstEffective(m_ArbsApexFirst, m_ArbsApexOnly),
+                                    state->index, asApex, state->jsId, (uint16_t)m_GamepadMask),
                  state);
     return true;
 }
@@ -1009,7 +1210,7 @@ void SdlInputHandler::arbsRunSteps(const std::vector<arbsw::HostStep>& steps, Ga
     }
 }
 
-void SdlInputHandler::arbsMovePad(int from, int to)
+void SdlInputHandler::arbsMovePad(int from, int to, bool forApex)
 {
     GamepadState* x = &m_GamepadState[from];
     // Risk K3: the mouse emulation timer holds a pointer to this slot -> stop it before the slot moves
@@ -1025,11 +1226,18 @@ void SdlInputHandler::arbsMovePad(int from, int to)
     SDL_GameControllerSetPlayerIndex(m_GamepadState[to].controller, to);
 #endif
     SDL_memset(x, 0, sizeof(*x));
-    // Bit [from] stays set (the APEX takes that number); the moved pad's bit is added
-    m_GamepadMask |= (1 << to);
+    // Bit [from] stays set (the APEX takes that number); the moved pad's bit is added (B2c: not for a hidden pad)
+    if (!m_GamepadState[to].arbsHidden) {
+        m_GamepadMask |= (1 << to);
+    }
     ArbsBridge::onGamepadIndexChanged(m_GamepadState[to].jsId, to);
     char line[160];
-    std::snprintf(line, sizeof(line), "ARBS-W: APEX 우선 - %d번 패드를 %d번으로 옮김(APEX 가 %d번)", from, to, from);
+    if (forApex) {
+        std::snprintf(line, sizeof(line), "ARBS-W: APEX 우선 - %d번 패드를 %d번으로 옮김(APEX 가 %d번)", from, to, from);
+    }
+    else {
+        std::snprintf(line, sizeof(line), "ARBS-W: APEX 단독: APEX 빠짐 - 숨긴 %d번 패드를 %d번으로 옮김(잠정 결정 D1)", from, to);
+    }
     ArbsBridge::log(line);
 }
 #endif
@@ -1288,6 +1496,17 @@ int SdlInputHandler::getAttachedGamepadMask()
             }
         }
     }
+
+#ifdef ARBS_W
+    // B2c 2-1: APEX-only + a 37d7/2502 device in the SDL list -> only the APEX bit (the other pads will be hidden)
+    const int arbsMask = arbsw::apexOnlyStartMask(true, m_ArbsApexOnly, ArbsBridge::sdlListHasExact(), (uint16_t)mask);
+    if (arbsMask != mask) {
+        char line[160];
+        std::snprintf(line, sizeof(line), "ARBS-W: APEX 단독: 시작 패드 마스크 0x%x -> 0x%x (SDL 목록에 VID/PID 37d7/2502 있음)", mask, arbsMask);
+        ArbsBridge::log(line);
+        mask = arbsMask;
+    }
+#endif
 
     return mask;
 }

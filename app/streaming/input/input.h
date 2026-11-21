@@ -50,6 +50,9 @@ struct GamepadState {
     uint32_t arbsButtons;
     uint32_t arbsCaps;
     bool arbsArrivalSkipped;
+    // ARBS-W B2c 2-1 (APEX-only mode): this pad is hidden from the host - no arrival, input, motion, touch or battery,
+    // no mask bit. Local state (buttons/axes) is still kept so the current state is sent once when it is shown again.
+    bool arbsHidden;
 #endif
 };
 
@@ -279,8 +282,14 @@ private:
     void arbsApplyBind(const ArbsBind& bind);
     bool arbsSendArrival(GamepadState* state, bool asApex);
     void arbsRunSteps(const std::vector<arbsw::HostStep>& steps, GamepadState* state);
-    void arbsMovePad(int from, int to);
+    void arbsMovePad(int from, int to, bool forApex = true);
+    // B2c 2-1 (APEX-only mode)
+    void arbsSyncHidden(GamepadState* skip);                // hide / show every other pad to match arbsHidingNow()
+    void arbsHidePad(GamepadState* state);
+    void arbsShowPad(GamepadState* state);
+    void arbsPrepareShow(GamepadState* removed);            // DEVICEREMOVED of a visible pad: mask bits before the MC
     bool m_ArbsApexFirst;
+    bool m_ArbsApexOnly;
     arbsw::HostLedger m_ArbsHost;
 #endif
 };

@@ -128,6 +128,7 @@ ApexBinder::Decision ApexBinder::onPadAdded(int js, int index, uint16_t vid, uin
     Decision d;
     pads_.erase(std::remove_if(pads_.begin(), pads_.end(), [js](const Pad& p) { return p.js == js; }), pads_.end());
     pads_.push_back(Pad{js, index, vid, pid});
+    if (std::find(seen_.begin(), seen_.end(), js) == seen_.end()) seen_.push_back(js);
     if (firstAddMs_ < 0) firstAddMs_ = nowMs;
     if (sdlListHasExact) exactSeen_ = true;
     if (isExactVidPid(vid, pid)) {
@@ -267,6 +268,7 @@ void ApexBinder::onIndexChanged(int js, int index) {
 
 void ApexBinder::reset() {
     pads_.clear();
+    seen_.clear();
     boundJs_ = kNone;
     boundKind_ = ApexMatch::None;
     firstAddMs_ = -1;
@@ -275,6 +277,8 @@ void ApexBinder::reset() {
     exactSeen_ = false;
     gen_++;
 }
+
+bool ApexBinder::seen(int js) const { return std::find(seen_.begin(), seen_.end(), js) != seen_.end(); }
 
 bool ApexBinder::removalNeedsIf2(int js) const {
     if (js != boundJs_) return false;
@@ -377,6 +381,39 @@ std::vector<HostStep> planUnbind(const HostLedger& l, bool multi, int index, uin
     v.push_back(HostStep{HostStep::Kind::Remove, index, static_cast<uint16_t>(mask & ~bit), false});
     v.push_back(HostStep{HostStep::Kind::Arrival, index, static_cast<uint16_t>(mask | bit), false});
     return v;
+}
+
+// ------------------------------------------------------------------------------------------------ APEX-only (B2c 2-1)
+bool hideOther(bool apexOnly, bool padIsApex, bool apexBound, bool exactPending) {
+    return apexOnly && !padIsApex && (apexBound || exactPending);
+}
+
+uint16_t apexOnlyStartMask(bool multi, bool apexOnly, bool exactInSdlList, uint16_t upstreamMask) {
+    if (multi && apexOnly && exactInSdlList && upstreamMask != 0) return 0x1;
+    return upstreamMask;
+}
+
+std::vector<HostStep> planHide(const HostLedger& l, bool multi, int index, uint16_t mask) {
+    std::vector<HostStep> v;
+    if (index < 0 || index >= HostLedger::kMax) return v;
+    if (multi) {
+        const uint16_t bit = static_cast<uint16_t>(1u << index);
+        if (l.role(index) != HostRole::None) v.push_back(HostStep{HostStep::Kind::Remove, index, static_cast<uint16_t>(mask & ~bit), false});
+        return v;
+    }
+    if (l.role(0) == HostRole::Normal) v.push_back(HostStep{HostStep::Kind::Remove, 0, 0, false});
+    return v;
+}
+
+std::vector<HostStep> planUnhide(const HostLedger& l, bool multi, int index, int joystickId, uint16_t mask) {
+    return planArrival(l, multi, false, index, false, joystickId, mask);
+}
+
+int pickShowMover(const bool* occupiedAfter, const bool* hidden, int n) {
+    if (n <= 0 || occupiedAfter == nullptr || hidden == nullptr || occupiedAfter[0]) return -1;
+    for (int i = 1; i < n; i++)
+        if (occupiedAfter[i] && hidden[i]) return i;
+    return -1;
 }
 
 bool outputLenUsable(uint16_t outLen) { return outLen >= kWireSize; }
@@ -531,6 +568,12 @@ bool ArrivalGate::live() const {
 bool ArrivalGate::pending() const {
     std::lock_guard<std::mutex> g(mu_);
     return pending_;
+}
+
+bool reopenGateOnIndexChange(ArrivalGate& g, int oldIndex, int newIndex) {
+    if (oldIndex < 0 || oldIndex == newIndex) return false;
+    g.onApexRemoved();
+    return true;
 }
 
 arbs::Engine::Config toEngineConfig(const ArbsSettings& in) {

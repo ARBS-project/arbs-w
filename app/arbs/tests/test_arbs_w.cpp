@@ -530,7 +530,8 @@ TEST(w_port, write_read_ring_disconnect_over_pipe) {
         CHECK(r == arbs::IoResult::Disconnected);
         r = port.writeFrame(frame, 100);
         CHECK(r == arbs::IoResult::Disconnected);
-        CHECK(log.has("IF2 분리 감지"));
+        // B2c 2-3 (verify B2b #24): the flag is set before the log line is written -> wait for the line (test only)
+        CHECK(waitFor([&] { return log.has("IF2 분리 감지"); }, 2000));
     }  // destructor: stop reader, close handle
     CHECK(log.has("IF2 닫힘"));
     if (p.server != INVALID_HANDLE_VALUE) CloseHandle(p.server);
@@ -579,11 +580,17 @@ struct HostSim {
     HostLedger led;
     ApexBinder binder;
     uint16_t mask;
+    // B2c 2-1 (APEX-only). Off = B2b behaviour (T1..T13 unchanged).
+    bool apexOnly = false;
+    std::vector<int> listExactIds;  // instance ids of the 37D7/2502 game controllers in the SDL list
+    bool openFails = false;         // WinHidPort::open fails in bindTo -> ApexBinder::onBindFailed
     struct Slot {
         bool used = false;
         int js = 0;
         uint16_t vid = 0, pid = 0;
         bool skipped = false;
+        bool hidden = false;  // GamepadState::arbsHidden
+        int buttons = 0;
     } slots[16];
     std::vector<std::string> packets;
     int64_t pendingCheck = -1;
@@ -598,6 +605,121 @@ struct HostSim {
     }
     int indexOfSlot(int s) const { return multi ? s : 0; }
     bool bound(int js) const { return binder.boundJs() == js; }
+    bool anyBound() const { return binder.boundJs() != ApexBinder::kNone; }
+    // ArbsBridge::exactPending(): a 37D7/2502 game controller in the SDL list that the binder has not seen yet
+    bool pending() const {
+        for (int id : listExactIds)
+            if (!binder.seen(id)) return true;
+        return false;
+    }
+    // input.cpp: APEX-only on -> start mask (getAttachedGamepadMask)
+    void only() {
+        apexOnly = true;
+        mask = apexOnlyStartMask(multi, true, listExact, mask);
+    }
+    void unplugExact(int id) {
+        listExactIds.erase(std::remove(listExactIds.begin(), listExactIds.end(), id), listExactIds.end());
+        listExact = !listExactIds.empty();
+    }
+    // gamepad.cpp arbsMovePad
+    void move(int from, int to, bool forApex) {
+        slots[to] = slots[from];
+        slots[from] = Slot();
+        if (!slots[to].hidden) mask = static_cast<uint16_t>(mask | (1u << to));
+        binder.onIndexChanged(slots[to].js, to);
+        packets.push_back(forApex ? "mv" + std::to_string(from) + ">" + std::to_string(to)
+                                  : "mv" + std::to_string(from) + ">" + std::to_string(to) + "(D1)");
+    }
+    // gamepad.cpp sendGamepadState: nothing for a hidden pad; single mode merges the visible pads only
+    void input(int js, int buttons) {
+        const int s = slotOf(js);
+        if (s < 0) return;
+        slots[s].buttons = buttons;
+        sendState(s);
+    }
+    void sendState(int s) {
+        if (slots[s].hidden) return;
+        int b = slots[s].buttons;
+        if (!multi) {
+            for (const Slot& o : slots)
+                if (o.used && !o.hidden) b |= o.buttons;
+        }
+        char t[48];
+        std::snprintf(t, sizeof t, "in%d:b=0x%x/m=0x%x", indexOfSlot(s), b, mask);
+        packets.push_back(t);
+    }
+    // battery / motion / touch / mouse emulation: one guard in gamepad.cpp (state->arbsHidden -> return)
+    bool sendsAux(int js) const {
+        const int s = slotOf(js);
+        return s >= 0 && !slots[s].hidden;
+    }
+    // gamepad.cpp arbsHidePad / arbsShowPad / arbsSyncHidden / arbsPrepareShow
+    void hide(int s) {
+        const int idx = indexOfSlot(s);
+        if (multi) mask = static_cast<uint16_t>(mask & ~(1u << idx));
+        run(planHide(led, multi, idx, mask), slots[s].js);
+        slots[s].hidden = true;
+        packets.push_back("hide" + std::to_string(slots[s].js));
+    }
+    void show(int s) {
+        const int idx = indexOfSlot(s);
+        slots[s].hidden = false;
+        if (multi) mask = static_cast<uint16_t>(mask | (1u << idx));
+        packets.push_back("show" + std::to_string(slots[s].js));
+        run(planUnhide(led, multi, idx, slots[s].js, mask), slots[s].js);
+        sendState(s);
+    }
+    void sync(int skip) {
+        if (!apexOnly) return;
+        const bool b = anyBound(), p = pending();
+        if (!hideOther(true, false, b, p) && multi) {
+            bool occ[16], hid[16];
+            for (int i = 0; i < 16; i++) {
+                occ[i] = slots[i].used;
+                hid[i] = occ[i] && slots[i].hidden && i != skip;
+            }
+            const int mover = pickShowMover(occ, hid, 16);
+            if (mover >= 0) move(mover, 0, false);
+        }
+        for (int i = 0; i < 16; i++) {
+            if (!slots[i].used || i == skip) continue;
+            const bool apex = bound(slots[i].js);
+            const bool want = hideOther(true, apex, b, p);
+            if (want && !slots[i].hidden) hide(i);
+            else if (!want && slots[i].hidden && !apex) show(i);
+        }
+    }
+    void prepareShow(int removed) {
+        if (!apexOnly || !multi || slots[removed].hidden) return;
+        const bool hiding = hideOther(true, false, anyBound(), pending());
+        bool occ[16], hid[16];
+        for (int i = 0; i < 16; i++) {
+            occ[i] = slots[i].used && i != removed;
+            hid[i] = occ[i] && slots[i].hidden;
+        }
+        const int mover = hiding ? -1 : pickShowMover(occ, hid, 16);
+        for (int i = 0; i < 16; i++) {
+            if (!hid[i] || i == mover) continue;
+            if (!hiding || bound(slots[i].js)) mask = static_cast<uint16_t>(mask | (1u << i));
+        }
+    }
+    // gamepad.cpp arbsApplyBind (check / removal paths)
+    void applyBind(const ApexBinder::Decision& d) {
+        if (d.unbindJs != ApexBinder::kNone) applyLost(d.unbindJs);
+        sync(-1);
+        if (d.bindJs != ApexBinder::kNone && bound(d.bindJs)) {
+            const int s = slotOf(d.bindJs);
+            if (s >= 0 && slots[s].hidden) {
+                slots[s].hidden = false;
+                if (multi) mask = static_cast<uint16_t>(mask | (1u << s));
+            }
+            applyBound(d.bindJs);
+        }
+    }
+    void bridgeExecute(const ApexBinder::Decision& d) {
+        // arbs_bridge.cpp bindTo failure -> onBindFailed (the binder forgets the binding)
+        if (openFails && d.bindJs != ApexBinder::kNone) binder.onBindFailed(d.bindJs);
+    }
     void run(const std::vector<HostStep>& steps, int js) {
         for (const HostStep& s : steps) {
             char b[64];
@@ -609,17 +731,19 @@ struct HostSim {
     }
     void arrive(int slot, bool asApex) {
         Slot& p = slots[slot];
-        if (skipArrivalSingle(multi, apexFirst, isExactVidPid(p.vid, p.pid), asApex, binder.boundJs() != ApexBinder::kNone, listExact)) {
+        if (p.hidden) return;  // B2c: arbsSendArrival returns false for a hidden pad
+        if (!apexOnly &&
+            skipArrivalSingle(multi, apexFirst, isExactVidPid(p.vid, p.pid), asApex, binder.boundJs() != ApexBinder::kNone, listExact)) {
             p.skipped = true;
             packets.push_back("skip" + std::to_string(p.js));
             return;
         }
         p.skipped = false;
-        run(planArrival(led, multi, apexFirst, indexOfSlot(slot), asApex, p.js, mask), p.js);
+        run(planArrival(led, multi, apexFirstEffective(apexFirst, apexOnly), indexOfSlot(slot), asApex, p.js, mask), p.js);
     }
     void applyLost(int js) {
         const int s = slotOf(js);
-        if (s >= 0) run(planUnbind(led, multi, indexOfSlot(s), mask), js);
+        if (s >= 0 && !apexOnly) run(planUnbind(led, multi, indexOfSlot(s), mask), js);
     }
     void applyBound(int js) {
         const int s = slotOf(js);
@@ -632,23 +756,35 @@ struct HostSim {
         bool occ[16];
         for (int i = 0; i < 16; i++) occ[i] = slots[i].used;
         const bool slot0Exact = occ[0] && isExactVidPid(slots[0].vid, slots[0].pid);
-        const SlotPlan plan = planSlot(occ, 16, multi, apexFirst, slot0Exact, isExactVidPid(vid, pid), listExact);
+        const SlotPlan plan =
+            planSlot(occ, 16, multi, apexFirstEffective(apexFirst, apexOnly), slot0Exact, isExactVidPid(vid, pid), listExact);
         if (plan.slot < 0) return ApexBinder::Decision();
         if (plan.moveTo >= 0) {
-            slots[plan.moveTo] = slots[0];
-            slots[0] = Slot();
-            mask = static_cast<uint16_t>(mask | (1u << plan.moveTo));
-            binder.onIndexChanged(slots[plan.moveTo].js, plan.moveTo);
+            if (apexOnly) {
+                move(0, plan.moveTo, true);
+            } else {  // B2b path, unchanged
+                slots[plan.moveTo] = slots[0];
+                slots[0] = Slot();
+                mask = static_cast<uint16_t>(mask | (1u << plan.moveTo));
+                binder.onIndexChanged(slots[plan.moveTo].js, plan.moveTo);
+            }
         }
         Slot& p = slots[plan.slot];
         p.used = true;
         p.js = js;
         p.vid = vid;
         p.pid = pid;
+        p.hidden = false;
         const int idx = indexOfSlot(plan.slot);
         const ApexBinder::Decision d = binder.onPadAdded(js, idx, vid, pid, now, isExactVidPid(vid, pid) ? if2 : -1, listExact);
+        bridgeExecute(d);
         note(d);
-        if (multi) mask = static_cast<uint16_t>(mask | (1u << idx));
+        p.hidden = hideOther(apexOnly, bound(js), anyBound(), pending());
+        if (multi) mask = p.hidden ? static_cast<uint16_t>(mask & ~(1u << idx)) : static_cast<uint16_t>(mask | (1u << idx));
+        if (apexOnly) {
+            if (p.hidden) packets.push_back("hide" + std::to_string(js));
+            sync(plan.slot);
+        }
         if (plan.moveTo >= 0) arrive(plan.moveTo, bound(slots[plan.moveTo].js));
         if (d.unbindJs != ApexBinder::kNone) applyLost(d.unbindJs);
         arrive(plan.slot, bound(js));
@@ -656,17 +792,25 @@ struct HostSim {
     }
     ApexBinder::Decision check() {
         const ApexBinder::Decision d = binder.onCheck(now, if2, listExact);
+        bridgeExecute(d);
         pendingCheck = -1;
         note(d);
-        if (d.unbindJs != ApexBinder::kNone) applyLost(d.unbindJs);
-        if (d.bindJs != ApexBinder::kNone) applyBound(d.bindJs);
+        applyBind(d);
         return d;
     }
     ApexBinder::Decision remove(int js) {
         const int s = slotOf(js);
         const ApexBinder::Decision d = binder.onPadRemoved(js, now, if2);
+        bridgeExecute(d);
         note(d);
+        if (s >= 0 && slots[s].hidden) {  // B2c: the host never knew this pad
+            packets.push_back("hgone" + std::to_string(js));
+            slots[s] = Slot();
+            applyBind(d);
+            return d;
+        }
         if (s >= 0) {
+            prepareShow(s);
             const int idx = indexOfSlot(s);
             if (multi) mask = static_cast<uint16_t>(mask & ~(1u << idx));
             char b[32];
@@ -675,7 +819,7 @@ struct HostSim {
             if (multi) led.removed(idx);
             slots[s] = Slot();
         }
-        if (d.bindJs != ApexBinder::kNone) applyBound(d.bindJs);
+        applyBind(d);
         return d;
     }
     bool has(const std::string& p) const { return std::find(packets.begin(), packets.end(), p) != packets.end(); }
@@ -1082,6 +1226,477 @@ TEST(b2b_rtt, t13_session_summary_has_rtt) {
         const std::string sum = log.find("ARBS 세션 요약");
         CHECK_MSG(sum.find(feed ? "Moonlight RTT 평균 20ms" : "Moonlight RTT 평균 n/a") != std::string::npos, sum);
     }
+}
+
+// ================================================================================================ B2c (H1..H13, P2..P4)
+// docs/analysis/B2c.md section 5 2-4. APEX-only mode (setting arbsApexOnly): HostSim replays gamepad.cpp's B2c order
+// (slot plan -> move -> bind -> hide/show sync -> moved pad -> this pad; removal: prepareShow -> removal MC -> D1 move ->
+// show). "hide<js>"/"show<js>" = the ARBS log line of the transition, "in<n>:b=/m=" = an MC input packet.
+namespace {
+constexpr int kDsJs = 102;  // a DualSense next to a presumed APEX (H9)
+HostSim simOnly(bool multi, bool apexFirst, int attached, bool apexInList, int apexId = kApexJs) {
+    HostSim h(multi, apexFirst, attached);
+    if (apexInList) {
+        h.listExact = true;
+        h.listExactIds = {apexId};
+    }
+    h.only();
+    return h;
+}
+}  // namespace
+
+// pure rules: hideOther / start mask / planHide / planUnhide / pickShowMover / binder seen / setting default
+TEST(b2c_hide, rules_table) {
+    // hidden only with the setting on, never the APEX itself, only while the APEX is bound or a 37d7/2502 pad is pending
+    CHECK(hideOther(true, false, true, false));
+    CHECK(hideOther(true, false, false, true));
+    CHECK(!hideOther(true, false, false, false));  // no APEX (or bind failed): normal Moonlight
+    CHECK(!hideOther(true, true, true, true));     // the APEX
+    CHECK(!hideOther(false, false, true, true));   // setting off = B2b
+    CHECK(apexFirstEffective(false, true));
+    CHECK(apexFirstEffective(true, false));
+    CHECK(!apexFirstEffective(false, false));
+    CHECK_EQ(static_cast<int>(apexOnlyStartMask(true, true, true, 0x3)), 0x1);
+    CHECK_EQ(static_cast<int>(apexOnlyStartMask(true, true, false, 0x3)), 0x3);  // no APEX in the list
+    CHECK_EQ(static_cast<int>(apexOnlyStartMask(true, false, true, 0x3)), 0x3);  // setting off
+    CHECK_EQ(static_cast<int>(apexOnlyStartMask(false, true, true, 0x1)), 0x1);  // single mode is always 0x1
+    CHECK_EQ(static_cast<int>(apexOnlyStartMask(true, true, true, 0x0)), 0x0);   // nothing attached
+    HostLedger l;
+    CHECK_EQ(planHide(l, true, 1, 0x1).size(), static_cast<size_t>(0));  // host never knew number 1
+    l.sent(HostStep{HostStep::Kind::Arrival, 1, 0x3, false}, 100);
+    std::vector<HostStep> v = planHide(l, true, 1, 0x1);
+    CHECK_EQ(v.size(), static_cast<size_t>(1));
+    CHECK(v[0].kind == HostStep::Kind::Remove && v[0].index == 1 && v[0].mask == 0x1);
+    l.sent(HostStep{HostStep::Kind::Arrival, 0, 0x1, false}, 100);
+    v = planHide(l, false, 0, 0x1);  // single: normal 0 -> Remove(0, mask 0)
+    CHECK_EQ(v.size(), static_cast<size_t>(1));
+    CHECK(v[0].kind == HostStep::Kind::Remove && v[0].index == 0 && v[0].mask == 0);
+    HostLedger a;
+    a.sent(HostStep{HostStep::Kind::Arrival, 0, 0x1, true}, 101);
+    CHECK_EQ(planHide(a, false, 0, 0x1).size(), static_cast<size_t>(0));  // single: 0 already PS/PCM
+    v = planUnhide(HostLedger(), true, 2, 100, 0x1);
+    CHECK_EQ(v.size(), static_cast<size_t>(1));
+    CHECK(v[0].kind == HostStep::Kind::Arrival && !v[0].apex && v[0].index == 2 && v[0].mask == 0x5);
+    v = planUnhide(a, false, 0, 100, 0x1);  // single: Arrival(0) (the host ignores it while 0 is allocated)
+    CHECK_EQ(v.size(), static_cast<size_t>(1));
+    CHECK(!v[0].apex && v[0].index == 0);
+    bool occ[16] = {}, hid[16] = {};
+    occ[1] = occ[3] = true;
+    hid[1] = hid[3] = true;
+    CHECK_EQ(pickShowMover(occ, hid, 16), 1);
+    occ[0] = true;
+    CHECK_EQ(pickShowMover(occ, hid, 16), -1);  // slot 0 still taken
+    occ[0] = false;
+    hid[1] = hid[3] = false;
+    CHECK_EQ(pickShowMover(occ, hid, 16), -1);  // nothing hidden
+    ApexBinder b;
+    CHECK(!b.seen(kApexJs));
+    b.onPadAdded(kApexJs, 0, kApexV, kApexP, 0, 0, true);  // IF2 0: not bound, but seen (no longer pending)
+    CHECK(b.seen(kApexJs));
+    CHECK_EQ(b.boundJs(), ApexBinder::kNone);
+    b.onPadRemoved(kApexJs, 1, -1);
+    CHECK(b.seen(kApexJs));  // ids are not reused within a session
+    b.reset();
+    CHECK(!b.seen(kApexJs));
+    CHECK(mt::truth(ArbsSettings().apexOnly));  // default on
+    CHECK(mt::truth(ArbsSettings().apexFirst));
+}
+
+// H1: built-in pad then APEX (both in the SDL list at start), multi + APEX-only: the host only ever sees the APEX
+TEST(b2c_hide, h01_builtin_then_apex_multi) {
+    HostSim h = simOnly(true, true, 2, true);
+    CHECK_EQ(static_cast<int>(h.mask), 0x1);  // start mask (gcmap) without the built-in pad
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    h.add(kApexJs, kApexV, kApexP);
+    CHECK_EQ(h.slotOf(kApexJs), 0);
+    CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+    CHECK_MSG(h.all() == "hide100 A0:apex/m=0x1 ", h.all());
+    h.input(kBuiltinJs, 0x1000);  // A on the built-in pad: nothing to the host
+    h.input(kApexJs, 0x2000);
+    CHECK_MSG(h.all() == "hide100 A0:apex/m=0x1 in0:b=0x2000/m=0x1 ", h.all());
+    CHECK(h.led.role(0) == HostRole::Apex);
+    CHECK(h.led.role(1) == HostRole::None);
+    CHECK(!h.sendsAux(kBuiltinJs));  // battery / motion / touch / mouse emulation
+    CHECK(h.sendsAux(kApexJs));
+}
+
+// H2: reversed order (APEX first): same host result
+TEST(b2c_hide, h02_apex_then_builtin_multi) {
+    HostSim h = simOnly(true, true, 2, true);
+    h.add(kApexJs, kApexV, kApexP);
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    CHECK_EQ(h.slotOf(kApexJs), 0);
+    CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+    CHECK_MSG(h.all() == "A0:apex/m=0x1 hide100 ", h.all());
+    CHECK_EQ(static_cast<int>(h.mask), 0x1);
+    CHECK(h.led.role(1) == HostRole::None);
+}
+
+// H3: APEX connected later (built-in pad already reported as number 0; dongle not plugged at the check)
+TEST(b2c_hide, h03_apex_later) {
+    for (bool multi : {true, false}) {
+        HostSim h = simOnly(multi, true, 1, false);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.if2 = 0;  // no dongle yet: the 1000 ms presumed check binds nothing
+        h.now = 1000;
+        CHECK(h.check().action == BA::None);
+        h.now = 5000;
+        h.if2 = 1;
+        h.listExact = true;
+        h.listExactIds = {kApexJs};
+        CHECK(h.add(kApexJs, kApexV, kApexP).action == BA::BindExact);
+        if (multi) {
+            // built-in moved to slot 1 (struct only) and hidden; number 0 removed (mask 0) then APEX arrival, both channel 0
+            CHECK_MSG(h.all() == "A0:norm/m=0x1 mv0>1 hide100 R0/m=0x0 A0:apex/m=0x1 ", h.all());
+            CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+            CHECK_EQ(h.binder.indexOf(kBuiltinJs), 1);
+        } else {
+            CHECK_MSG(h.all() == "A0:norm/m=0x1 R0/m=0x0 hide100 A0:apex/m=0x1 ", h.all());
+        }
+        CHECK_EQ(static_cast<int>(h.mask), 0x1);
+        CHECK(h.led.role(0) == HostRole::Apex);
+        CHECK_EQ(h.led.creator(0), kApexJs);
+    }
+}
+
+// H4 + H5: APEX removed -> built-in pad shown again on number 0 (D1); APEX plugged again -> hidden again, APEX on 0
+TEST(b2c_hide, h04_h05_apex_removed_then_reconnected) {
+    HostSim h = simOnly(true, true, 2, true);
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    h.add(kApexJs, kApexV, kApexP);
+    h.packets.clear();
+    h.input(kBuiltinJs, 0x1000);
+    h.unplugExact(kApexJs);
+    const auto d = h.remove(kApexJs);
+    CHECK(d.action == BA::Unbind);
+    // removal MC frees 0 (mask without bit 0), the hidden pad moves to 0 and arrives on the same channel 0
+    CHECK_MSG(h.all() == "gone0/m=0x0 mv1>0(D1) show100 A0:norm/m=0x1 in0:b=0x1000/m=0x1 ", h.all());
+    CHECK_EQ(h.slotOf(kBuiltinJs), 0);
+    CHECK_EQ(h.binder.indexOf(kBuiltinJs), 0);
+    CHECK(h.led.role(0) == HostRole::Normal);
+    h.packets.clear();
+    h.input(kBuiltinJs, 0x0);  // built-in input goes to the host again
+    CHECK_MSG(h.all() == "in0:b=0x0/m=0x1 ", h.all());
+    // H5: reconnect (new SDL instance id), gate re-opened by the removal
+    ArrivalGate g;
+    CHECK(!g.setLive());
+    CHECK(g.onApexAdded() == ArrivalGate::Action::SendNow);
+    g.onApexRemoved();
+    h.packets.clear();
+    const int again = kApexJs + 10;
+    h.listExact = true;
+    h.listExactIds = {again};
+    CHECK(h.add(again, kApexV, kApexP).action == BA::BindExact);
+    CHECK_MSG(h.all() == "mv0>1 hide100 R0/m=0x0 A0:apex/m=0x1 ", h.all());
+    CHECK(g.onApexAdded() == ArrivalGate::Action::SendNow);
+    CHECK_EQ(static_cast<int>(h.mask), 0x1);
+    h.packets.clear();
+    h.input(kBuiltinJs, 0x1000);
+    CHECK_MSG(h.all() == "", h.all());
+}
+
+// H6: single mode ("Force gamepad #1" on) + APEX-only: no built-in arrival, its input not merged; after the APEX leaves
+// the built-in pad drives number 0 again
+TEST(b2c_hide, h06_single_mode) {
+    HostSim h = simOnly(false, true, 2, true);
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    h.add(kApexJs, kApexV, kApexP);
+    CHECK_MSG(h.all() == "hide100 A0:apex/m=0x1 ", h.all());
+    h.input(kBuiltinJs, 0x1000);
+    h.input(kApexJs, 0x2000);  // not merged with the built-in pad's 0x1000
+    CHECK_MSG(h.all() == "hide100 A0:apex/m=0x1 in0:b=0x2000/m=0x1 ", h.all());
+    h.packets.clear();
+    h.unplugExact(kApexJs);
+    h.remove(kApexJs);
+    CHECK_MSG(h.all() == "gone0/m=0x1 show100 A0:norm/m=0x1 in0:b=0x1000/m=0x1 ", h.all());
+    CHECK(h.led.role(0) == HostRole::Apex);  // the host keeps its PS/PCM number 0 (normal arrival ignored)
+}
+
+// H7: APEX-only off = B2b (the same HostSim with the new code paths reproduces T1/T2/T4 strings)
+TEST(b2c_hide, h07_off_keeps_b2b) {
+    {
+        HostSim h(true, true, 2);
+        h.listExact = true;
+        h.listExactIds = {kApexJs};  // ignored while apexOnly is off
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.add(kApexJs, kApexV, kApexP);
+        CHECK_MSG(h.all() == "A1:norm/m=0x3 A0:apex/m=0x3 ", h.all());
+        h.input(kBuiltinJs, 0x1000);
+        CHECK_MSG(h.all() == "A1:norm/m=0x3 A0:apex/m=0x3 in1:b=0x1000/m=0x3 ", h.all());
+    }
+    {
+        HostSim h(false, true, 2);
+        h.listExact = true;
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.add(kApexJs, kApexV, kApexP);
+        CHECK_MSG(h.all() == "skip100 A0:apex/m=0x1 ", h.all());
+        h.input(kApexJs, 0x2000);  // B2b single mode merges the built-in pad (0 buttons here)
+        h.input(kBuiltinJs, 0x1000);
+        CHECK_MSG(h.all() == "skip100 A0:apex/m=0x1 in0:b=0x2000/m=0x1 in0:b=0x3000/m=0x1 ", h.all());
+    }
+    {
+        HostSim h(true, false, 1);
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.now = 1000;
+        CHECK(h.check().action == BA::BindPresumed);
+        h.listExact = true;
+        CHECK(h.add(kApexJs, kApexV, kApexP).action == BA::Rebind);
+        CHECK_MSG(h.all() == "A0:norm/m=0x1 R0/m=0x0 A0:apex/m=0x1 R0/m=0x2 A0:norm/m=0x3 A1:apex/m=0x3 ", h.all());
+    }
+    {  // APEX removed with the setting off: the built-in pad keeps number 1, nothing re-reported
+        HostSim h(true, true, 2);
+        h.listExact = true;
+        h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        h.add(kApexJs, kApexV, kApexP);
+        h.packets.clear();
+        h.remove(kApexJs);
+        CHECK_MSG(h.all() == "gone0/m=0x2 ", h.all());
+    }
+}
+
+// H8: 37d7/2502 in the list but not bindable (IF2 0, IF2 2, or the open fails) -> hidden pads are shown again
+TEST(b2c_hide, h08_bind_failure_shows_again) {
+    for (int mode = 0; mode < 3; mode++) {
+        for (bool multi : {true, false}) {
+            HostSim h = simOnly(multi, true, 2, true);
+            if (mode == 0) h.if2 = 0;
+            if (mode == 1) h.if2 = 2;
+            if (mode == 2) h.openFails = true;
+            h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+            h.add(kApexJs, kApexV, kApexP);
+            CHECK_EQ(h.binder.boundJs(), ApexBinder::kNone);
+            if (multi) {
+                CHECK_MSG(h.all() == "hide100 show100 A1:norm/m=0x3 in1:b=0x0/m=0x3 A0:norm/m=0x3 ", h.all());
+            } else {
+                CHECK_MSG(h.all() == "hide100 show100 A0:norm/m=0x1 in0:b=0x0/m=0x1 A0:norm/m=0x1 ", h.all());
+            }
+        }
+    }
+}
+
+// H9: presumed APEX (045e/028e, no 37d7/2502 anywhere): other pads visible until the 1000 ms check binds it
+TEST(b2c_hide, h09_presumed_bind_hides_others) {
+    HostSim h = simOnly(true, true, 2, false);
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);  // the APEX behind the XInput fallback
+    h.add(kDsJs, 0x054C, 0x0CE6);
+    CHECK_MSG(h.all() == "A0:norm/m=0x3 A1:norm/m=0x3 ", h.all());
+    h.now = 1000;
+    CHECK(h.check().action == BA::BindPresumed);
+    CHECK_MSG(h.all() == "A0:norm/m=0x3 A1:norm/m=0x3 R1/m=0x1 hide102 R0/m=0x0 A0:apex/m=0x1 ", h.all());
+    CHECK(h.led.role(1) == HostRole::None);
+    CHECK_EQ(static_cast<int>(h.mask), 0x1);
+}
+
+// H10: presumed -> exact re-bind with APEX-only: the pad that lost the binding is only removed (no normal re-arrival)
+TEST(b2c_hide, h10_rebind_lost_pad_hidden) {
+    HostSim h = simOnly(true, true, 1, false);
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    h.now = 1000;
+    CHECK(h.check().action == BA::BindPresumed);
+    h.now = 9000;
+    h.listExact = true;
+    h.listExactIds = {kApexJs};
+    const auto d = h.add(kApexJs, kApexV, kApexP);
+    CHECK(d.action == BA::Rebind);
+    CHECK_MSG(h.all() == "A0:norm/m=0x1 R0/m=0x0 A0:apex/m=0x1 mv0>1 hide100 R0/m=0x0 A0:apex/m=0x1 ", h.all());
+    CHECK(h.all().find("A1:norm") == std::string::npos);
+    CHECK_EQ(static_cast<int>(h.mask), 0x1);
+    CHECK(h.led.role(0) == HostRole::Apex);
+    CHECK_EQ(h.led.creator(0), kApexJs);
+}
+
+// H11 (verify B2b #6): the bound APEX moves to another number -> the gate is re-opened so that arrival is sent
+TEST(b2c_hide, h11_gate_reopen_on_index_change) {
+    ArrivalGate g;
+    CHECK(!g.setLive());
+    CHECK(g.onApexAdded() == ArrivalGate::Action::SendNow);  // APEX (presumed) arrival on 0
+    ArrivalGate old;
+    CHECK(!old.setLive());
+    CHECK(old.onApexAdded() == ArrivalGate::Action::SendNow);
+    CHECK(old.onApexAdded() == ArrivalGate::Action::AlreadySent);  // B2b: the moved number's arrival was dropped
+    CHECK(reopenGateOnIndexChange(g, 0, 1));
+    CHECK(g.onApexAdded() == ArrivalGate::Action::SendNow);  // B2c: sent on the new number
+    CHECK(!reopenGateOnIndexChange(g, 1, 1));                // same number: nothing
+    CHECK(!reopenGateOnIndexChange(g, -1, 0));               // first bind: nothing
+    CHECK(g.onApexAdded() == ArrivalGate::Action::AlreadySent);
+    // the B2b scenario that needs it: presumed APEX on 0, a 37d7/2502 pad that cannot bind (IF2 2) takes slot 0
+    HostSim h(true, true, 1);
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    h.now = 1000;
+    CHECK(h.check().action == BA::BindPresumed);
+    h.listExact = true;
+    h.if2 = 2;
+    CHECK(h.add(kApexJs, kApexV, kApexP).action == BA::None);
+    CHECK_EQ(h.slotOf(kBuiltinJs), 1);
+    CHECK(h.all().find("A1:apex/m=0x3") != std::string::npos);  // the arrival the gate must let through
+}
+
+// H12: a hidden pad sends no battery / motion / touch / mouse emulation / input, also after a hide on a live pad
+TEST(b2c_hide, h12_hidden_pad_sends_nothing) {
+    HostSim h = simOnly(true, true, 1, false);
+    h.add(kDsJs, 0x054C, 0x0CE6);  // visible (no APEX yet)
+    CHECK(h.sendsAux(kDsJs));
+    h.listExact = true;
+    h.listExactIds = {kApexJs};
+    h.add(kApexJs, kApexV, kApexP);  // DualSense was number 0 -> moved + hidden
+    CHECK(!h.sendsAux(kDsJs));
+    h.packets.clear();
+    for (int b : {0x1, 0x2, 0x0}) h.input(kDsJs, b);
+    CHECK_MSG(h.all() == "", h.all());
+    // removing the hidden pad sends nothing to the host either
+    h.remove(kDsJs);
+    CHECK_MSG(h.all() == "hgone102 ", h.all());
+    CHECK_EQ(static_cast<int>(h.mask), 0x1);
+}
+
+// H13: APEX-only is independent of Force #1 (single/multi) and of the APEX first setting
+TEST(b2c_hide, h13_independent_of_force1_and_apex_first) {
+    for (bool apexFirst : {true, false}) {
+        HostSim m = simOnly(true, apexFirst, 2, true);
+        m.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        m.add(kApexJs, kApexV, kApexP);
+        CHECK_MSG(m.all() == "hide100 A0:apex/m=0x1 ", m.all());  // = H1
+        HostSim s = simOnly(false, apexFirst, 2, true);
+        s.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+        s.add(kApexJs, kApexV, kApexP);
+        CHECK_MSG(s.all() == "hide100 A0:apex/m=0x1 ", s.all());  // = H6
+    }
+}
+
+// ------------------------------------------------------------------------------------------------ B2c 2-2 IF2 open
+namespace {
+struct FakeOpen {
+    std::vector<unsigned long> exclusiveErrors;  // one entry per exclusive attempt; 0 = success
+    unsigned long sharedError = 0;
+    HANDLE handle = INVALID_HANDLE_VALUE;
+    int exclusiveCalls = 0, sharedCalls = 0, sleptMs = 0;
+    WinHidPort::OpenFn fn() {
+        return [this](const std::wstring&, bool exclusive) {
+            WinHidPort::OpenAttempt a;
+            unsigned long e = sharedError;
+            if (exclusive) {
+                e = exclusiveCalls < static_cast<int>(exclusiveErrors.size()) ? exclusiveErrors[static_cast<size_t>(exclusiveCalls)]
+                                                                               : exclusiveErrors.back();
+                exclusiveCalls++;
+            } else {
+                sharedCalls++;
+            }
+            if (e == 0) a.handle = handle;
+            else a.error = e;
+            return a;
+        };
+    }
+    WinHidPort::SleepFn sleep() {
+        return [this](int ms) { sleptMs += ms; };
+    }
+};
+}  // namespace
+
+// P2: error 32 twice, then the exclusive open succeeds (short overlap with another handle after a replug)
+TEST(b2c_if2, p02_exclusive_retry_succeeds) {
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    FakeOpen f;
+    f.exclusiveErrors = {32, 32, 0};
+    f.handle = p.client;
+    const int base = WinHidPort::openCount();
+    std::string why;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
+        CHECK(port != nullptr);
+        CHECK(port->exclusive());
+        CHECK_EQ(WinHidPort::openCount(), base + 1);
+    }
+    CHECK_EQ(WinHidPort::openCount(), base);
+    CHECK_EQ(f.exclusiveCalls, 3);
+    CHECK_EQ(f.sharedCalls, 0);
+    CHECK_EQ(f.sleptMs, 200);
+    CHECK(log.has("IF2 열기 - 이 프로세스에 이미 열린 IF2 포트 " + std::to_string(base) + "개"));
+    CHECK(log.has("IF2 배타 열기 오류 32(공유 위반) - 100ms 간격으로 최대 5회 다시 시도"));
+    CHECK(log.has("IF2 배타 열기 성공(재시도 2회"));
+    CHECK(log.has("IF2 열림(배타"));
+    CHECK(!log.has("다른 프로그램이 IF2 를 쓰는 중"));
+    CloseHandle(p.server);
+}
+
+// P3: error 32 on every exclusive try -> shared open after <= 0.5 s, warning kept + "0 ports of this process"
+TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    FakeOpen f;
+    f.exclusiveErrors = {32};
+    f.handle = p.client;
+    std::string why;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
+        CHECK(port != nullptr);
+        CHECK(!port->exclusive());
+    }
+    CHECK_EQ(f.exclusiveCalls, 1 + WinHidPort::kExclusiveRetries);
+    CHECK_EQ(f.sharedCalls, 1);
+    CHECK_EQ(f.sleptMs, 500);
+    CHECK(f.sleptMs <= 500);
+    CHECK(log.has("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
+                  "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요"));
+    CHECK(log.has("배타 재시도 5회 모두 오류 32, 이 프로세스에 열린 IF2 포트 0개 - 0개면 ARBS-W 자신의 핸들이 아님"));
+    CHECK(log.has("IF2 열림(공유"));
+    CloseHandle(p.server);
+    // another error: no retry, shared at once; shared also failing -> nullptr + reason
+    CaptureLog log2;
+    FakeOpen g;
+    g.exclusiveErrors = {5};
+    g.sharedError = 32;
+    std::unique_ptr<WinHidPort> none = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log2, &why, g.fn(), g.sleep());
+    CHECK(none == nullptr);
+    CHECK_EQ(g.exclusiveCalls, 1);
+    CHECK_EQ(g.sleptMs, 0);
+    CHECK(log2.has("IF2 배타 열기 실패(오류 5) -> 공유 모드로 다시 시도"));
+    CHECK_MSG(why == "IF2 열기 실패(공유 모드도 실패, 오류 32)", why);
+}
+
+// P4: detach -> re-open: with the real CreateFileW attempt on a temp file (no device). Our own exclusive port blocks the
+// exclusive AND the shared open (so the field's "shared open succeeded" cannot be our own handle); after the port is
+// destroyed the count is 0 and the same path opens exclusively again.
+TEST(b2c_if2, p04_detach_then_reopen_exclusive) {
+    const std::string dir = scratchDir();
+    const std::wstring path = std::wstring(dir.begin(), dir.end()) + L"\\arbs-w-b2c-if2-stand-in.bin";
+    {
+        HANDLE c = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        CHECK(c != INVALID_HANDLE_VALUE);
+        CloseHandle(c);
+    }
+    const HidCandidate c = cand(path.c_str(), kApexV, kApexP, 0xFFA0);
+    const int base = WinHidPort::openCount();
+    int slept = 0;
+    const WinHidPort::SleepFn noWait = [&slept](int ms) { slept += ms; };
+    CaptureLog log;
+    std::string why;
+    std::unique_ptr<WinHidPort> first = WinHidPort::openWith(c, log, &why, &WinHidPort::createFileAttempt, noWait);
+    CHECK(first != nullptr);
+    CHECK(first->exclusive());
+    CHECK_EQ(WinHidPort::openCount(), base + 1);
+    CaptureLog busy;
+    std::unique_ptr<WinHidPort> second = WinHidPort::openWith(c, busy, &why, &WinHidPort::createFileAttempt, noWait);
+    CHECK(second == nullptr);
+    CHECK_EQ(slept, 500);
+    CHECK(busy.has("이 프로세스에 열린 IF2 포트 " + std::to_string(base + 1) + "개"));
+    CHECK_MSG(why == "IF2 열기 실패(공유 모드도 실패, 오류 32)", why);
+    first.reset();  // = Engine::detach -> port_.reset(): reader joined, CloseHandle, events closed
+    CHECK_EQ(WinHidPort::openCount(), base);
+    CHECK(log.has("IF2 닫힘"));
+    CaptureLog again;
+    slept = 0;
+    std::unique_ptr<WinHidPort> third = WinHidPort::openWith(c, again, &why, &WinHidPort::createFileAttempt, noWait);
+    CHECK(third != nullptr);
+    CHECK(third->exclusive());
+    CHECK_EQ(slept, 0);
+    CHECK(again.has("IF2 열기 - 이 프로세스에 이미 열린 IF2 포트 " + std::to_string(base) + "개"));
+    CHECK(!again.has("오류 32"));
+    third.reset();
+    CHECK_EQ(WinHidPort::openCount(), base);
+    CHECK(DeleteFileW(path.c_str()) != 0);
 }
 
 int main(int argc, char** argv) {

@@ -60,11 +60,16 @@ public:
     static ArbsBind onGamepadAdded(int playerIndex, int joystickId, uint16_t sdlVid, uint16_t sdlPid);
     // ARBS_SDL_CODE_APEX_CHECK (session.cpp -> SdlInputHandler): delayed presumed check.
     static ArbsBind onApexCheck(int generation);
-    // Slot move (APEX first numbering): keeps the binder / engine controller number in step.
+    // Slot move (APEX first numbering): keeps the binder / engine controller number in step. B2c 2-3: when the bound
+    // APEX number really changes, the arrival gate is re-opened so the arrival on the new number is sent.
     static void onGamepadIndexChanged(int joystickId, int playerIndex);
     static bool isExactPad(uint16_t sdlVid, uint16_t sdlPid);  // 37D7/2502
     static bool sdlListHasExact();                            // any 37D7/2502 device in the SDL joystick list
     static bool apexBound();
+    // B2c 2-1: a 37D7/2502 game controller is in the SDL list and its DEVICEADDED has not been handled yet in this
+    // session (it may still bind) -> APEX-only mode keeps the other pads hidden. A handled pad that did not bind is not
+    // pending (analysis "exactBindFailed").
+    static bool exactPending();
     static void log(const char* line);                        // one ARBS log line (UTF-8)
     static uint32_t apexCaps(uint32_t sdlCaps);
     static uint8_t apexType();
