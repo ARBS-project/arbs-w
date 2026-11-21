@@ -1598,6 +1598,7 @@ struct FakeOpen {
 // P2 (B3b F3 [잠정 D-B3b-2], was "error 32 twice then exclusive after retries"): error 32 once -> shared at once, even
 // though a second exclusive try would have succeeded (no retry, no wait, no re-acquire)
 TEST(b2c_if2, p02_busy_once_then_shared_at_once) {
+    WinHidPort::resetSessionNotices();  // B4 D-B4-5: process-wide "warned in this session" flag
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
@@ -1626,6 +1627,7 @@ TEST(b2c_if2, p02_busy_once_then_shared_at_once) {
 
 // P3: error 32 on the exclusive try -> shared open at once (B3b F3: was after <= 2 s), warning kept + "0 ports of this process"
 TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
+    WinHidPort::resetSessionNotices();  // B4 D-B4-5
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
@@ -1664,6 +1666,7 @@ TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
 // exclusive AND the shared open (so the field's "shared open succeeded" cannot be our own handle); after the port is
 // destroyed the count is 0 and the same path opens exclusively again.
 TEST(b2c_if2, p04_detach_then_reopen_exclusive) {
+    WinHidPort::resetSessionNotices();  // B4 D-B4-5
     const std::string dir = scratchDir();
     const std::wstring path = std::wstring(dir.begin(), dir.end()) + L"\\arbs-w-b2c-if2-stand-in.bin";
     {
@@ -1766,6 +1769,7 @@ TEST(b2d_persist, b2_packet_order_same_as_b2c) {
 // R1 (B3b F3 [잠정 D-B3b-2], was "exclusive after 19 retries"): no exclusive retry at all - error 32 once, the next
 // exclusive try would succeed, but the port is opened shared at once and the stall line is still written
 TEST(b2d_if2, r1_no_exclusive_retry) {
+    WinHidPort::resetSessionNotices();  // B4 D-B4-5
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
@@ -1793,6 +1797,7 @@ TEST(b2d_if2, r1_no_exclusive_retry) {
 // R2 (B3b F3, was "twenty retries then shared"): error 32 -> one exclusive try, shared at once, one stall line;
 // shared also failing -> "결과 실패"
 TEST(b2d_if2, r2_busy_then_shared_no_wait) {
+    WinHidPort::resetSessionNotices();  // B4 D-B4-5
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
     CaptureLog log;
@@ -2330,6 +2335,93 @@ TEST(b3b_f2, d_lines_and_frame_command) {
                   "IF2(UsagePage 0xFFA0) 0개, 이 프로세스 IF2 포트 0개(F2 진단)",
               hidRecheckLine(5000, sum, 0));
     CHECK(hidRecheckLine(30000, sum, 1).find("IF2 분리 30초 뒤") != std::string::npos);
+    // B4 [잠정 D-B4-4]: default/unknown (-1) and >= 1 dongle paths keep the b2e wording above
+    CHECK(hidRecheckLine(5000, sum, 0, -1) == hidRecheckLine(5000, sum, 0));
+    const std::string sum1 = "HID 인터페이스 12개 중 APEX 동글 경로 3개(열림 3), IF2(UsagePage 0xFFA0) 1개";
+    CHECK_MSG(hidRecheckLine(5000, sum1, 0, 3) ==
+                  "ARBS-W: IF2 분리 5초 뒤 SDL 에 37d7/2502 없음 - Windows HID 인터페이스 12개 중 APEX 동글 경로 3개(열림 3), "
+                  "IF2(UsagePage 0xFFA0) 1개, 이 프로세스 IF2 포트 0개(F2 진단)",
+              hidRecheckLine(5000, sum1, 0, 3));
+    CHECK(hidRecheckLine(30000, sum1, 0, 1).find("(F2 진단)") != std::string::npos);
+}
+
+// B4 [잠정 D-B4-4] (ARBS-W b2f): 0 APEX dongle paths in Windows (dongle pulled, EA-B3b-U-01) -> info wording, no
+// "SDL 에 ... 없음"/"(F2 진단)"; the HID summary and own-port count stay in the line
+TEST(b4_w, d3_zero_dongle_paths_is_info) {
+    const std::string sum = "HID 인터페이스 12개 중 APEX 동글 경로 0개(열림 0), IF2(UsagePage 0xFFA0) 0개";
+    const std::string l5 = hidRecheckLine(5000, sum, 0, 0);
+    CHECK_MSG(l5 == "ARBS-W: IF2 분리 5초 뒤 - 동글이 Windows 에 없음(뽑힘이면 정상, 정보) - HID 인터페이스 12개 중 APEX 동글 경로 "
+                    "0개(열림 0), IF2(UsagePage 0xFFA0) 0개, 이 프로세스 IF2 포트 0개",
+              l5);
+    CHECK(l5.find("F2 진단") == std::string::npos);
+    CHECK(l5.find("경고") == std::string::npos);
+    const std::string l30 = hidRecheckLine(30000, sum, 1, 0);
+    CHECK(l30.find("IF2 분리 30초 뒤 - 동글이 Windows 에 없음") != std::string::npos);
+    CHECK(l30.find("이 프로세스 IF2 포트 1개") != std::string::npos);
+}
+
+// B4 [잠정 D-B4-3] (ARBS-W b2f): first log line carries the edition; the unit-test build has no ARBS_W_EDITION_STR -> "dev"
+TEST(b4_w, log_header_edition) {
+    CHECK_MSG(std::string(editionName()) == "dev", editionName());
+    CHECK_MSG(logHeaderLine("b2f", "6.2.0") == "ARBS-W b2f 로그 - Moonlight 6.2.0 + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음",
+              logHeaderLine("b2f", "6.2.0"));
+    CHECK(logHeaderLine(editionName(), "6.2.0").rfind("ARBS-W dev 로그 - Moonlight 6.2.0", 0) == 0);
+    CHECK(logHeaderLine("", "6.2.0").rfind("ARBS-W dev 로그", 0) == 0);
+    CHECK(logHeaderLine(nullptr, "6.2.0").rfind("ARBS-W dev 로그", 0) == 0);
+    CHECK(logHeaderLine("b2f", "6.2.0").find("B2d") == std::string::npos);
+}
+
+// B4 [잠정 D-B4-5] (ARBS-W b2f): error 32 twice in one stream session -> the long warning once, then the short info line;
+// the stall line on both; resetSessionNotices() (= next onStreamLive) -> the warning once again
+TEST(b4_w, error32_warning_once_per_session) {
+    WinHidPort::resetSessionNotices();
+    const auto openBusy = [](CaptureLog& log) {
+        PipePair p = makePipe();
+        CHECK(p.client != INVALID_HANDLE_VALUE);
+        FakeOpen f;
+        f.exclusiveErrors = {32};
+        f.handle = p.client;
+        std::string why;
+        {
+            std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
+            CHECK(port != nullptr);
+            CHECK(!port->exclusive());
+        }
+        CHECK_EQ(f.exclusiveCalls, 1);
+        CHECK_EQ(f.sharedCalls, 1);
+        CloseHandle(p.server);
+    };
+    CaptureLog s1;
+    openBusy(s1);  // session 1, first error 32
+    openBusy(s1);  // session 1, second error 32 (e.g. a dongle replug)
+    CHECK_EQ(countLines(s1, "ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중"), 1);
+    CHECK_EQ(countLines(s1, WinHidPort::kSharedAgainLine), 1);
+    CHECK(s1.has("ARBS-W: IF2 공유 모드로 열기(오류 32, 경고는 세션 첫 회만)"));
+    CHECK_EQ(countLines(s1, "메인 스레드 정지 약"), 2);  // F3 stall line kept on every error 32
+    CHECK_EQ(countLines(s1, "IF2 열림(공유"), 2);
+    // a non-32 failure in the same session is not affected
+    CaptureLog other;
+    {
+        PipePair p = makePipe();
+        FakeOpen g;
+        g.exclusiveErrors = {5};
+        g.handle = p.client;
+        std::string why;
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), other, &why, g.fn(), g.sleep());
+        CHECK(port != nullptr);
+        port.reset();
+        CloseHandle(p.server);
+    }
+    CHECK(other.has("IF2 배타 열기 실패(오류 5) -> 공유 모드로 다시 시도"));
+    CHECK(!other.has(WinHidPort::kSharedAgainLine));
+    // next stream session
+    WinHidPort::resetSessionNotices();
+    CaptureLog s2;
+    openBusy(s2);
+    openBusy(s2);
+    CHECK_EQ(countLines(s2, "ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중"), 1);
+    CHECK_EQ(countLines(s2, WinHidPort::kSharedAgainLine), 1);
+    WinHidPort::resetSessionNotices();
 }
 
 // F2-D3: checkpoints 5 s and 30 s once each per start; stop cancels; a new start restarts

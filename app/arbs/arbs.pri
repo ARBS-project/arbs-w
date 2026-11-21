@@ -9,6 +9,12 @@ ARBS_CORE_DIR = $$clean_path($$PWD/../../../../core/arbs-core)
 message(ARBS-W: APEX haptics bridge enabled - ARBS Core at $$ARBS_CORE_DIR)
 
 DEFINES += ARBS_W
+# B4 [잠정 D-B4-3] (ARBS-W b2f): edition name for the first log line, from the process-local environment variable set by
+# client-w/scripts/arbs-w-build.bat (derived from the output zip name). Empty or unusual characters -> "dev".
+ARBS_W_EDITION = $$(ARBS_W_EDITION)
+!contains(ARBS_W_EDITION, "^[A-Za-z0-9._-]+$"): ARBS_W_EDITION = dev
+message(ARBS-W: edition $$ARBS_W_EDITION)
+DEFINES += ARBS_W_EDITION_STR=\\\"$$ARBS_W_EDITION\\\"
 INCLUDEPATH += $$PWD $$ARBS_CORE_DIR/include
 
 SOURCES += \

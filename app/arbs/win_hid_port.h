@@ -29,7 +29,9 @@ namespace arbsw {
 
 // DEVICE SIGNAL: enumerates present HID interfaces (opens matching paths with access 0 to read attributes/caps).
 // [diag] receives a one-line summary (counts only, no paths). Not used by unit tests.
-std::vector<HidCandidate> enumerateApexIf2(std::string* diag);
+// B4 [잠정 D-B4-4]: [donglePaths] (optional) receives the number of APEX dongle paths (pre-filter vid_37d7&pid_2502),
+// the same count as in [diag]; F2-D3 uses 0 to tell "dongle not in Windows (pulled)" from an SDL-level miss.
+std::vector<HidCandidate> enumerateApexIf2(std::string* diag, int* donglePaths = nullptr);
 
 class WinHidPort final : public arbs::IApexPort {
 public:
@@ -64,6 +66,13 @@ public:
     static OpenAttempt createFileAttempt(const std::wstring& path, bool exclusive);
     // Number of WinHidPort objects alive in this process (constructor +1, destructor -1 after CloseHandle).
     static int openCount();
+    // B4 [잠정 D-B4-5] (ARBS-W b2f): error 32 happens on every connection in the field and the shared open works
+    // (EA-B3b-U-01), so the long warning is written once per stream session; later error-32 opens in the same session
+    // write a short info line. The stall line ("메인 스레드 정지 약 N ms", F3 diagnosis) stays on every error 32.
+    // resetSessionNotices() = new session (ArbsBridge::onStreamLive, before any bind of that session; unit tests call it
+    // first because the flag is process-wide).
+    static void resetSessionNotices();
+    static constexpr const char* kSharedAgainLine = "ARBS-W: IF2 공유 모드로 열기(오류 32, 경고는 세션 첫 회만)";
 
     // Takes ownership of an overlapped handle (used by open() and by the pipe-based unit test).
     WinHidPort(void* overlappedHandle, uint16_t outLen, uint16_t inLen, arbs::ILog& log, bool exclusive);
@@ -122,6 +131,7 @@ private:
     bool prioritySet_ = false;
 
     static std::atomic<int> s_open_;  // B2c 2-2: ports alive in this process
+    static std::atomic<bool> s_warned32_;  // B4 D-B4-5: error-32 warning already written in this stream session
 };
 
 }  // namespace arbsw

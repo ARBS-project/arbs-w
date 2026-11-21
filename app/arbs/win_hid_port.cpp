@@ -36,8 +36,9 @@ int64_t steadyNs() {
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------ enumeration
-std::vector<HidCandidate> enumerateApexIf2(std::string* diag) {
+std::vector<HidCandidate> enumerateApexIf2(std::string* diag, int* donglePaths) {
     std::vector<HidCandidate> out;
+    if (donglePaths) *donglePaths = -1;  // unknown until the list was read
     GUID hidGuid;
     HidD_GetHidGuid(&hidGuid);
     HDEVINFO set = SetupDiGetClassDevsW(&hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
@@ -87,6 +88,7 @@ std::vector<HidCandidate> enumerateApexIf2(std::string* diag) {
         out.push_back(c);
     }
     SetupDiDestroyDeviceInfoList(set);
+    if (donglePaths) *donglePaths = prefiltered;  // B4 D-B4-4
     if (diag) {
         int if2 = 0;
         for (const HidCandidate& c : out) if2 += isApexIf2(c) ? 1 : 0;
@@ -98,8 +100,11 @@ std::vector<HidCandidate> enumerateApexIf2(std::string* diag) {
 
 // ------------------------------------------------------------------------------------------------ open
 std::atomic<int> WinHidPort::s_open_{0};
+std::atomic<bool> WinHidPort::s_warned32_{false};
 
 int WinHidPort::openCount() { return s_open_.load(); }
+
+void WinHidPort::resetSessionNotices() { s_warned32_.store(false); }
 
 WinHidPort::OpenAttempt WinHidPort::createFileAttempt(const std::wstring& path, bool exclusive) {
     OpenAttempt a;
@@ -141,10 +146,15 @@ std::unique_ptr<WinHidPort> WinHidPort::openWith(const HidCandidate& c, arbs::IL
     if (a.handle == nullptr) {
         const unsigned long e = a.error;
         if (e == ERROR_SHARING_VIOLATION) {
-            log.info("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
-                     "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요" +
-                     arbs::jc::fmt(" (배타 재시도 %d회, 이 프로세스에 열린 IF2 포트 %d개 - 0개면 ARBS-W 자신의 핸들이 아님)", retries,
-                                   openCount()));
+            // B4 [잠정 D-B4-5]: the long warning once per stream session, a short info line after that
+            if (!s_warned32_.exchange(true)) {
+                log.info("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
+                         "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요" +
+                         arbs::jc::fmt(" (배타 재시도 %d회, 이 프로세스에 열린 IF2 포트 %d개 - 0개면 ARBS-W 자신의 핸들이 아님)", retries,
+                                       openCount()));
+            } else {
+                log.info(kSharedAgainLine);
+            }
         } else {
             log.info("ARBS-W: IF2 배타 열기 실패(오류 " + winErr(e) + ") -> 공유 모드로 다시 시도");
         }

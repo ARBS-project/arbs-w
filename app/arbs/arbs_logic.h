@@ -323,6 +323,18 @@ private:
     int64_t startNs_ = 0;
 };
 // D3: "ARBS-W: IF2 분리 S초 뒤 SDL 에 37d7/2502 없음 - Windows <hid summary>, 이 프로세스 IF2 포트 K개(F2 진단)"
-std::string hidRecheckLine(int64_t checkpointMs, const std::string& hidSummary, int ownPorts);
+// B4 [잠정 D-B4-4] (ARBS-W b2f): [donglePaths] = APEX dongle paths Windows still lists (enumerateApexIf2). 0 -> the dongle
+// is not in Windows at all (a pulled dongle, normal) -> an info line instead of the diagnosis wording:
+// "ARBS-W: IF2 분리 S초 뒤 - 동글이 Windows 에 없음(뽑힘이면 정상, 정보) - <hid summary>, 이 프로세스 IF2 포트 K개".
+// >= 1 (or unknown, -1) -> the b2e line above unchanged (dongle present but SDL does not list it).
+std::string hidRecheckLine(int64_t checkpointMs, const std::string& hidSummary, int ownPorts, int donglePaths = -1);
+
+// ---- B4 (ARBS-W b2f) [잠정 D-B4-3]: edition name in the first log line ----
+// The build wrapper (client-w/scripts/arbs-w-build.bat) derives ARBS_W_EDITION from the output zip name
+// (arbs-w-b2f-portable.zip -> b2f); arbs.pri turns it into ARBS_W_EDITION_STR. Builds without it (unit tests, a plain
+// qmake build) say "dev".
+const char* editionName();
+// "ARBS-W <edition> 로그 - Moonlight <version> + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음"
+std::string logHeaderLine(const char* edition, const char* moonlightVersion);
 
 }  // namespace arbsw

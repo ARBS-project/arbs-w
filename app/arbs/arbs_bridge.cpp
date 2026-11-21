@@ -240,8 +240,9 @@ void unbindEngine(const char* reason) {
 void hidRecheck(int64_t checkpointMs) {
     if (sdlHasExactDevice()) return;
     std::string diag;
-    arbsw::enumerateApexIf2(&diag);
-    logLine(arbsw::hidRecheckLine(checkpointMs, diag, arbsw::WinHidPort::openCount()));
+    int donglePaths = -1;  // B4 [잠정 D-B4-4]: 0 = dongle not in Windows (pulled) -> info wording
+    arbsw::enumerateApexIf2(&diag, &donglePaths);
+    logLine(arbsw::hidRecheckLine(checkpointMs, diag, arbsw::WinHidPort::openCount(), donglePaths));
 }
 
 void logJoystickList();
@@ -438,7 +439,8 @@ void ArbsBridge::initEarly(const QString& logDir) {
     const QStringList old = dir.entryList(QStringList("ARBS-*.log"), QDir::Files, QDir::Time);
     for (int i = 10; i < old.size(); i++) QFile(dir.filePath(old.at(i))).remove();
 
-    logLine(std::string("ARBS-W B2d 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
+    // B4 [잠정 D-B4-3]: edition from the build wrapper (was the fixed text "B2d")
+    logLine(arbsw::logHeaderLine(arbsw::editionName(), VERSION_STR));
     logLine(std::string("ARBS-W: 로그 폴더 = ") + (QFileInfo::exists(dir.filePath("portable.dat")) ? "포터블 폴더(exe 폴더)" : "임시 폴더"));
     size_t start = 0;
     while (start < g_earlyNotes.size()) {
@@ -477,6 +479,9 @@ void ArbsBridge::onStreamLive(const StreamingPreferences& prefs) {
     if (g_impl == nullptr) return;
     try {
         const arbsw::ArbsSettings s = settingsFrom(prefs);
+        // B4 [잠정 D-B4-5]: new stream session -> the error-32 warning may be written once again. The input handler (and
+        // so every APEX bind / IF2 open of this session) is created after this call (session.cpp).
+        arbsw::WinHidPort::resetSessionNotices();
         logLine("ARBS-W: 스트림 연결됨(LiStartConnection 성공) - streamLive");
         arbs::Engine& e = *g_impl->engine;
         // onSessionStart touches engine-thread state (jitter, counters): only call it while the engine is inactive

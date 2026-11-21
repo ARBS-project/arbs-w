@@ -785,9 +785,26 @@ bool HidRecheckWatch::active() const {
     return active_;
 }
 
-std::string hidRecheckLine(int64_t checkpointMs, const std::string& hidSummary, int ownPorts) {
+std::string hidRecheckLine(int64_t checkpointMs, const std::string& hidSummary, int ownPorts, int donglePaths) {
+    if (donglePaths == 0) {  // B4 [잠정 D-B4-4]: dongle gone from Windows (pulled) -> info, not a diagnosis
+        return arbs::jc::fmt("ARBS-W: IF2 분리 %lld초 뒤 - 동글이 Windows 에 없음(뽑힘이면 정상, 정보) - ",
+                             static_cast<long long>(checkpointMs / 1000)) +
+               hidSummary + arbs::jc::fmt(", 이 프로세스 IF2 포트 %d개", ownPorts);
+    }
     return arbs::jc::fmt("ARBS-W: IF2 분리 %lld초 뒤 SDL 에 37d7/2502 없음 - Windows ", static_cast<long long>(checkpointMs / 1000)) +
            hidSummary + arbs::jc::fmt(", 이 프로세스 IF2 포트 %d개(F2 진단)", ownPorts);
+}
+
+// ---- B4 (ARBS-W b2f) [잠정 D-B4-3] ----
+#ifndef ARBS_W_EDITION_STR
+#define ARBS_W_EDITION_STR "dev"
+#endif
+
+const char* editionName() { return ARBS_W_EDITION_STR; }
+
+std::string logHeaderLine(const char* edition, const char* moonlightVersion) {
+    return std::string("ARBS-W ") + (edition != nullptr && *edition != '\0' ? edition : "dev") + " 로그 - Moonlight " +
+           (moonlightVersion != nullptr ? moonlightVersion : "?") + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음";
 }
 
 }  // namespace arbsw

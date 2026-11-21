@@ -163,8 +163,15 @@ void StreamingPreferences::reload()
     connectionWarnings = settings.value(SER_CONNWARNINGS, true).toBool();
     configurationWarnings = settings.value(SER_CONFWARNINGS, true).toBool();
     richPresence = settings.value(SER_RICHPRESENCE, true).toBool();
+#ifdef ARBS_W
+    // ARBS-W b2f (B4 feature cleanup 1, provisional decision D-B4-6, planner has not ruled): default off for a new
+    // settings file (upstream: true). The checkboxes stay in the settings view, so turning them on restores upstream.
+    gamepadMouse = settings.value(SER_GAMEPADMOUSE, false).toBool();
+    detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, false).toBool();
+#else
     gamepadMouse = settings.value(SER_GAMEPADMOUSE, true).toBool();
     detectNetworkBlocking = settings.value(SER_DETECTNETBLOCKING, true).toBool();
+#endif
     showPerformanceOverlay = settings.value(SER_SHOWPERFOVERLAY, false).toBool();
     packetSize = settings.value(SER_PACKETSIZE, 0).toInt();
     swapMouseButtons = settings.value(SER_SWAPMOUSEBUTTONS, false).toBool();
