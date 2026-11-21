@@ -17,6 +17,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace arbsw {
@@ -101,5 +102,15 @@ std::vector<HostStep> planUnhide(const HostLedger& l, bool multi, int index, int
 // share channel 0). [occupiedAfter]/[hidden] have [n] entries (state after the APEX slot is cleared).
 // Returns that slot, or -1 (slot 0 still occupied / no hidden pad).
 int pickShowMover(const bool* occupiedAfter, const bool* hidden, int n);
+
+// ---- B3 1-1 (ARBS-W B2d): launch/resume gcpersist (docs/analysis/B3.md 1-1-3 option (b)) ----
+// Provisional decision D-B3-1 (planner has not ruled; analysis recommendation): APEX-only on -> gcpersist=1, so the host
+// keeps the composite DualSense (USB audio endpoint included) when number 0 is removed while the app runs, and re-binds
+// it with the new arrival's type/caps on the next arrival ("rebound to resumed client") instead of creating a new one.
+// The removal/arrival order (B2c numbering rules) is unchanged. APEX-only off -> upstream value !multiController.
+//  (multi, apexOnly) = (1,1) -> 1, (1,0) -> 0, (0,0) -> 1, (0,1) -> 1. No new setting.
+bool persistGamepads(bool multiController, bool apexOnly);
+// One ARBS log line for the launch request: "ARBS-W: 시작 요청 gcpersist=N(...)".
+std::string persistGamepadsNote(bool multiController, bool apexOnly);
 
 }  // namespace arbsw

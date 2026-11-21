@@ -72,6 +72,9 @@ struct Impl {
     std::atomic<SDL_TimerID> rttTimer{0};   // B2b 2-5
     std::atomic<bool> rttLogged{false};
     std::atomic<bool> verbose{false};
+    arbsw::If2DetachWatch detach;     // B3 1-3 (log only, provisional decision D4)
+    arbsw::PcmWait pcmWait;           // B3 1-4
+    int apexArrivalsThisSession = 0;  // main thread only (B3 1-4: first arrival = "접속 후", later = "재연결 후")
 };
 
 Impl* g_impl = nullptr;
@@ -105,6 +108,8 @@ Uint32 rttTimerCallback(Uint32 interval, void*) {
     Impl* im = g_impl;
     if (im == nullptr || !im->engine) return 0;
     try {
+        // B3 1-3 [잠정 D4]: IF2 detached >= 5 s and SDL has not removed the APEX -> one notice (no release in b2d)
+        if (im->detach.onTick(im->clock.nowNs())) logLine(arbsw::detachNoticeLine());
         uint32_t rtt = 0, var = 0;
         // common-c: try-lock on the ENet mutex + cached values; false until the first RTT estimate exists.
         if (LiGetEstimatedRttInfo(&rtt, &var)) {
@@ -181,8 +186,22 @@ void scanIf2(If2Scan& s) {
     s.done = true;
 }
 
+// B3 1-4: the APEX arrival went out (rc = 0) -> start waiting for the first PCM of that number.
+void armPcmWait(int index) {
+    const arbsw::PcmWait::Kind kind = arbsw::PcmWait::kindFor(g_impl->apexArrivalsThisSession++);
+    g_impl->pcmWait.arm(g_impl->clock.nowNs(), index, kind);
+}
+
+// B3 1-4: unbind / session end before the first PCM -> "... 첫 PCM 없음(N ms 기다림, ...)".
+void cancelPcmWait(const char* reason) {
+    arbsw::PcmWait::Result r;
+    if (g_impl->pcmWait.cancel(g_impl->clock.nowNs(), &r)) logLine(arbsw::pcmWaitNoneLine(r, reason));
+}
+
 // Stop sequence (engine thread, <= 1.5 s) and IF2 close; bridge state back to "no APEX".
 void unbindEngine(const char* reason) {
+    cancelPcmWait(reason);
+    g_impl->detach.disarm();
     const int64_t t0 = g_impl->clock.nowNs();
     g_impl->engine->detach(reason);
     g_impl->apexIndex = -1;
@@ -201,6 +220,8 @@ void logJoystickList();
 
 // IF2 open + attach + controller number + trigger/input seeds (B2b 2-3).
 bool bindTo(int js, int index, arbsw::ApexMatch kind, If2Scan& s) {
+    const int64_t bindT0 = g_impl->clock.nowNs();  // B3 1-2: main-thread time of this bind
+    const auto msSince = [](int64_t t) { return (g_impl->clock.nowNs() - t) / 1000000LL; };
     // B2c 2-2: SDL joystick list again at every bind (after a dongle replug it shows whether SDL HIDAPI took IF2)
     logJoystickList();
     scanIf2(s);
@@ -213,18 +234,28 @@ bool bindTo(int js, int index, arbsw::ApexMatch kind, If2Scan& s) {
     // only after we have opened the new one, and after a detach that took > 1.5 s Core still holds it. Release it here
     // first. (Core's own order - port released before the late engine thread is joined - is analysis gap 2, record only.)
     const int before = arbsw::WinHidPort::openCount();
+    const int64_t cleanupT0 = g_impl->clock.nowNs();
     if (before > 0) {
         logLine(arbs::jc::fmt("ARBS-W: 이 프로세스에 이전 IF2 포트 %d개가 아직 열려 있음 - 새로 열기 전에 엔진 분리로 닫음", before));
         g_impl->engine->detach("새 IF2 열기 전 이전 포트 정리");
         logLine(arbs::jc::fmt("ARBS-W: 이전 IF2 포트 정리 후 열린 포트 %d개", arbsw::WinHidPort::openCount()));
     }
+    const int64_t cleanupMs = msSince(cleanupT0);
     std::string why;
+    const int64_t openT0 = g_impl->clock.nowNs();
     std::unique_ptr<arbsw::WinHidPort> port = arbsw::WinHidPort::open(s.list[static_cast<size_t>(s.pick.index)], *g_impl->log, &why);
+    const int64_t openMs = msSince(openT0);
     if (!port) {
         logLine("ARBS-W: " + why + " -> 일반 패드로 처리(PCM 햅틱 광고 안 함)");
+        logLine(arbsw::bindStallLine(msSince(bindT0), cleanupMs, openMs));
         g_impl->binder.onBindFailed(js);
         return false;
     }
+    // B3 1-3: the port reports its detach (ReadFile error 995 etc.) once; stale generations are ignored.
+    const int detachGen = g_impl->detach.arm();
+    port->setDisconnectListener([detachGen] {
+        if (g_impl != nullptr) g_impl->detach.onDetach(detachGen, g_impl->clock.nowNs());
+    });
     g_impl->engine->attach(std::move(port));
     g_impl->engine->setControllerNumber(index);
     g_impl->apexIndex = index;
@@ -252,6 +283,7 @@ bool bindTo(int js, int index, arbsw::ApexMatch kind, If2Scan& s) {
                         "(트리거 위치 = SDL L2/R2 0..32767 -> 0..255). ") +
             (exact ? "VID/PID 일치 연결은 바로 입력 수신으로 처리(대기 없이 GetInfo)"
                    : "추정 연결은 APEX 를 만지면 대기가 끝남('입력 리포트 없이 대기 만료'가 나와도 정상 - 3초 뒤 GetInfo 진행)"));
+    logLine(arbsw::bindStallLine(msSince(bindT0), cleanupMs, openMs));
     return true;
 }
 
@@ -273,11 +305,15 @@ ArbsBind execute(const arbsw::ApexBinder::Decision& d, If2Scan& s) {
         if (bindTo(d.bindJs, d.bindIndex, d.bindKind, s)) r.boundJs = d.bindJs;
         break;
     case A::Unbind:
-    case A::UnbindThenBindExact:
+    case A::UnbindThenBindExact: {
+        // B3 1-3: how long SDL kept the APEX after IF2 was detached (EA-B2c-R-02: 1..24 s)
+        const int64_t sinceDetach = g_impl->detach.onSdlRemoved(g_impl->clock.nowNs());
+        if (sinceDetach >= 0) logLine(arbsw::detachRemovedLine(sinceDetach));
         logLine("ARBS-W: APEX 패드 제거(SDL) -> 엔진 분리");
         unbindEngine("SDL 제거");
         if (d.action == A::UnbindThenBindExact && bindTo(d.bindJs, d.bindIndex, d.bindKind, s)) r.boundJs = d.bindJs;
         break;
+    }
     }
     if (d.checkAtMs >= 0) scheduleCheckTimer(d.checkAtMs);
     return r;
@@ -314,6 +350,7 @@ void sendPending() {
     const int rc = LiSendControllerArrivalEvent(static_cast<uint8_t>(a.index), a.mask, a.type, a.buttons, static_cast<uint16_t>(a.caps));
     logLine("ARBS-W: APEX 도착 보고(보류분, 스트림 연결 후) 번호 " + std::to_string(a.index) + " 타입 PS caps 0x" +
             arbs::jc::fmt("%x", a.caps) + " rc=" + std::to_string(rc));
+    if (rc == 0) armPcmWait(a.index);  // B3 1-4
 }
 
 }  // namespace
@@ -369,7 +406,7 @@ void ArbsBridge::initEarly(const QString& logDir) {
     const QStringList old = dir.entryList(QStringList("ARBS-*.log"), QDir::Files, QDir::Time);
     for (int i = 10; i < old.size(); i++) QFile(dir.filePath(old.at(i))).remove();
 
-    logLine(std::string("ARBS-W B2c 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
+    logLine(std::string("ARBS-W B2d 로그 - Moonlight ") + VERSION_STR + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음");
     logLine(std::string("ARBS-W: 로그 폴더 = ") + (QFileInfo::exists(dir.filePath("portable.dat")) ? "포터블 폴더(exe 폴더)" : "임시 폴더"));
     size_t start = 0;
     while (start < g_earlyNotes.size()) {
@@ -450,6 +487,9 @@ void ArbsBridge::onStreamEnd(const char* reason) {
             std::lock_guard<std::mutex> g(g_impl->pendingMu);
             g_impl->pending.valid = false;
         }
+        cancelPcmWait(reason);  // B3 1-4
+        g_impl->apexArrivalsThisSession = 0;
+        g_impl->detach.disarm();  // B3 1-3
         arbs::Engine& e = *g_impl->engine;
         e.onSessionEnd(reason);  // stop sequence via the engine thread (<= 0.6 s) + session summary
         if (g_impl->minimizedPause.exchange(false)) e.onResume();
@@ -486,6 +526,9 @@ void ArbsBridge::onPcm(uint16_t controllerNumber, uint32_t sequence, const uint8
         int n = frames > 240 ? 240 : frames;
         if (pcm == nullptr) n = 0;
         if (n > 0) std::memcpy(buf, pcm, static_cast<size_t>(n) * 4);
+        // B3 1-4: first PCM packet for the armed number after the APEX arrival (atomic fast path when not armed)
+        arbsw::PcmWait::Result r;
+        if (g_impl->pcmWait.onPcm(g_impl->clock.nowNs(), controllerNumber, &r)) logLine(arbsw::pcmWaitLine(r));
         g_impl->engine->onPcm(controllerNumber, sequence, n > 0 ? buf : nullptr, n);
     } catch (...) {
     }
@@ -620,6 +663,7 @@ void ArbsBridge::sendApexArrival(int playerIndex, uint16_t activeGamepadMask, ui
                                                     static_cast<uint16_t>(capabilities));
         logLine("ARBS-W: APEX 도착 보고 번호 " + std::to_string(playerIndex) + " 타입 " + std::to_string(type) + "(PS) caps 0x" +
                 arbs::jc::fmt("%x", capabilities) + " rc=" + std::to_string(rc) + (rc == 0 ? "" : " (0 이 아니면 실패: -2 = 입력 스트림 미초기화)"));
+        if (rc == 0) armPcmWait(playerIndex);  // B3 1-4
         break;
     }
     case arbsw::ArrivalGate::Action::Deferred:
@@ -655,6 +699,8 @@ bool ArbsBridge::isApexJoystick(int joystickId) {
 void ArbsBridge::onApexInput() {
     if (g_impl == nullptr) return;
     g_impl->engine->onInputSeen();
+    // B3 1-3: the APEX keeps being used while IF2 is gone -> one warning per detach (atomic fast path otherwise)
+    if (g_impl->detach.onApexInput(g_impl->clock.nowNs())) logLine(arbsw::detachInputWarnLine());
 }
 
 void ArbsBridge::onApexTriggerAxis(bool left, int sdlAxisValue) {

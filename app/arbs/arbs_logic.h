@@ -4,6 +4,7 @@
 // is unit-tested without touching a device (app/arbs/tests). Design: docs/analysis/B2_DESIGN.md sections 4-3..4-6.
 #pragma once
 
+#include <atomic>
 #include <climits>
 #include <cstddef>
 #include <cstdint>
@@ -217,5 +218,78 @@ bool reopenGateOnIndexChange(ArrivalGate& g, int oldIndex, int newIndex);
 
 // ---- settings -> Core engine config ----
 arbs::Engine::Config toEngineConfig(const ArbsSettings& s);
+
+// ---- B3 1-2 (ARBS-W B2d): main-thread stall lines (docs/analysis/B3.md 1-2, provisional decision D-B3-2) ----
+// "ARBS-W: IF2 열기 - 메인 스레드 정지 약 N ms(배타 재시도 R회, 결과 배타|공유|실패)"
+std::string openStallLine(int64_t stallMs, int retries, const char* result);
+// "ARBS-W: APEX 묶기 메인 스레드 N ms(이전 포트 정리 C ms + IF2 열기 O ms)"
+std::string bindStallLine(int64_t totalMs, int64_t cleanupMs, int64_t openMs);
+
+// ---- B3 1-3 (ARBS-W B2d): IF2 detached (error 995 etc.) but SDL has not removed the APEX yet ----
+// Provisional decision D4 (planner has not ruled): b2d only MEASURES and WARNS. The "soft release" after N = 5 s
+// (unbind + show the hidden pads) is designed in docs/analysis/B3.md 1-3 but NOT implemented.
+// Threads: arm/disarm/onSdlRemoved/onApexInput on the main thread, onDetach on the port reader or engine thread,
+// onTick on the SDL timer thread (1 s RTT timer). All state is under one mutex; onApexInput has an atomic fast path.
+class If2DetachWatch {
+public:
+    static constexpr int64_t kNoticeMs = 5000;     // [잠정 D4] N = 5 s
+    static constexpr int64_t kInputWarnMs = 2000;  // APEX SDL input keeps coming > 2 s while IF2 is gone
+    int arm();     // new bind: clears the state, returns the generation the port listener must pass to onDetach
+    void disarm(); // engine unbound / session end
+    // First detach of the current generation: records the time, returns true. Stale generation / again -> false.
+    bool onDetach(int generation, int64_t nowNs);
+    // True once per detach: >= kNoticeMs since the detach and no SDL removal yet.
+    bool onTick(int64_t nowNs);
+    // SDL removed the bound APEX: ms since the detach (>= 0), or -1 when IF2 was not detached. Disarms.
+    int64_t onSdlRemoved(int64_t nowNs);
+    // True once per detach: an APEX SDL input arrives more than kInputWarnMs after the first APEX input seen after the
+    // detach (the pad is still in use although its vibration path is gone).
+    bool onApexInput(int64_t nowNs);
+    bool detached() const { return detachedFlag_.load(); }
+
+private:
+    mutable std::mutex mu_;
+    std::atomic<bool> detachedFlag_{false};
+    int gen_ = 0;
+    bool armed_ = false, detached_ = false, noticed_ = false, warned_ = false;
+    int64_t detachNs_ = 0, firstInputNs_ = -1;
+};
+// "ARBS-W: IF2 분리 후 SDL 제거까지 N ms"
+std::string detachRemovedLine(int64_t ms);
+// "ARBS-W: IF2 분리 5초 경과 - SDL 제거 아직 없음(...)"
+std::string detachNoticeLine();
+// "ARBS-W 경고: IF2 분리 상태인데 APEX 입력이 계속 들어옴 - 진동 경로 끊김(동글 다시 꽂기)"
+std::string detachInputWarnLine();
+
+// ---- B3 1-4 (ARBS-W B2d): time from the APEX arrival report (rc = 0) to the first PCM packet for that number ----
+// Measured in the bridge (Core has no hook; Core is unchanged). Provisional decision D-B3-4: the start is the arrival
+// report, the first arrival of a session is reported as "접속 후", later ones as "재연결 후".
+// Threads: arm/cancel on the main thread, onPcm on the common-c receive thread (atomic fast path; the mutex is only
+// taken while a wait is armed). One line per arm.
+class PcmWait {
+public:
+    enum class Kind : uint8_t { AfterConnect, AfterReconnect };
+    struct Result {
+        int64_t ms = 0;
+        int index = -1;
+        Kind kind = Kind::AfterConnect;
+    };
+    static Kind kindFor(int previousArrivalsThisSession) { return previousArrivalsThisSession > 0 ? Kind::AfterReconnect : Kind::AfterConnect; }
+    void arm(int64_t nowNs, int index, Kind kind);  // a second arm replaces the first
+    bool onPcm(int64_t nowNs, int index, Result* out);  // true once per arm, only for the armed number
+    bool cancel(int64_t nowNs, Result* out);            // true if a wait was armed (-> "없음" line)
+    bool armed() const { return armed_.load(); }
+
+private:
+    std::atomic<bool> armed_{false};
+    std::mutex mu_;
+    int64_t startNs_ = 0;
+    int index_ = -1;
+    Kind kind_ = Kind::AfterConnect;
+};
+// "ARBS-W: 재연결 후 첫 PCM N ms(APEX 도착 보고 -> 첫 PCM, 번호 I)" / "ARBS-W: 접속 후 첫 PCM N ms(번호 I)"
+std::string pcmWaitLine(const PcmWait::Result& r);
+// "ARBS-W: 재연결 후 첫 PCM 없음(N ms 기다림, 번호 I, <reason>)" (접속 후 ... for the first arrival)
+std::string pcmWaitNoneLine(const PcmWait::Result& r, const char* reason);
 
 }  // namespace arbsw

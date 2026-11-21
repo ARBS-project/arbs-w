@@ -51,9 +51,12 @@ public:
     using OpenFn = std::function<OpenAttempt(const std::wstring& path, bool exclusive)>;
     using SleepFn = std::function<void(int ms)>;
     // Error 32 (sharing violation) on the exclusive open -> up to kExclusiveRetries more exclusive tries kRetryDelayMs
-    // apart (<= 0.5 s on the main thread), then the shared open as before. The log always gets the number of IF2 ports
+    // apart (<= 2 s on the main thread), then the shared open as before. The log always gets the number of IF2 ports
     // this process still has open (0 = the other handle is not ARBS-W's own).
-    static constexpr int kExclusiveRetries = 5;
+    // B3 1-2 (ARBS-W B2d, provisional decision D-B3-2, planner has not ruled): 5 -> 20 tries (0.5 s -> 2 s), still
+    // blocking (a non-blocking open would make the bind result asynchronous and change the B2c hide/gate rules). The
+    // real blocked time (steady clock) is logged when at least one retry happened ("메인 스레드 정지 약 N ms").
+    static constexpr int kExclusiveRetries = 20;
     static constexpr int kRetryDelayMs = 100;
     static std::unique_ptr<WinHidPort> openWith(const HidCandidate& c, arbs::ILog& log, std::string* why, const OpenFn& openFn,
                                                 const SleepFn& sleepFn);
@@ -76,6 +79,10 @@ public:
 
     bool exclusive() const { return exclusive_; }
     bool disconnected() const { return disconnected_.load(); }
+    // B3 1-3 (ARBS-W B2d): called once, on the thread that first detects the detach (reader thread: ReadFile error 995
+    // etc.; engine thread: write path). Set before Engine::attach. If the port is already detached when the listener is
+    // set, it is called at once. Must not block (the bridge only records the time).
+    void setDisconnectListener(std::function<void()> fn);
     Stats stats() const;
 
 private:
@@ -100,6 +107,9 @@ private:
     std::condition_variable ringCv_;
     ReportRing ring_;
     std::atomic<bool> disconnected_{false};
+    std::mutex listenerMu_;                    // B3 1-3
+    std::function<void()> disconnectListener_;
+    bool listenerCalled_ = false;
     std::atomic<int> logBudget_{20};
 
     mutable std::mutex statsMu_;

@@ -118,6 +118,11 @@ std::unique_ptr<WinHidPort> WinHidPort::openWith(const HidCandidate& c, arbs::IL
         if (why) *why = "IF2 출력 리포트 길이 " + std::to_string(c.outLen) + " < 33 - 열지 않음";
         return nullptr;
     }
+    // B3 1-2: real time this call blocks the caller (the SDL/Qt main thread), steady clock
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto stallMs = [&t0] {
+        return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+    };
     // B2c 2-2: own ports still open in this process (0 = an error 32 below comes from another handle, not ARBS-W's)
     log.info("ARBS-W: IF2 열기 - 이 프로세스에 이미 열린 IF2 포트 " + std::to_string(openCount()) + "개");
     // Exclusive first (design 4-4): keeps Space Station / XHaptics / SDL from writing to IF2 while ARBS owns it.
@@ -125,6 +130,7 @@ std::unique_ptr<WinHidPort> WinHidPort::openWith(const HidCandidate& c, arbs::IL
     OpenAttempt a = openFn(c.path, true);
     // B2c 2-2: a sharing violation right after a dongle replug may be another handle opened only for a moment ->
     // bounded exclusive retry (kExclusiveRetries x kRetryDelayMs) before falling back to the shared open.
+    // B3 1-2 [잠정 D-B3-2]: 20 x 100 ms (<= 2 s), blocking; the blocked time is logged below.
     int retries = 0;
     while (a.handle == nullptr && a.error == ERROR_SHARING_VIOLATION && retries < kExclusiveRetries) {
         if (retries == 0) {
@@ -151,10 +157,12 @@ std::unique_ptr<WinHidPort> WinHidPort::openWith(const HidCandidate& c, arbs::IL
         exclusive = false;
         a = openFn(c.path, false);
         if (a.handle == nullptr) {
+            if (retries > 0) log.info(openStallLine(stallMs(), retries, "실패"));
             if (why) *why = "IF2 열기 실패(공유 모드도 실패, 오류 " + winErr(a.error) + ")";
             return nullptr;
         }
     }
+    if (retries > 0) log.info(openStallLine(stallMs(), retries, exclusive ? "배타" : "공유"));
     return std::unique_ptr<WinHidPort>(new WinHidPort(a.handle, c.outLen, c.inLen, log, exclusive));
 }
 
@@ -205,8 +213,24 @@ WinHidPort::Stats WinHidPort::stats() const {
 void WinHidPort::markDisconnected(unsigned long err, const char* where) {
     if (!disconnected_.exchange(true)) {
         log_.info(std::string("ARBS-W: IF2 분리 감지(") + where + ", 오류 " + std::to_string(err) + ")");
+        // B3 1-3: tell the bridge once (it records the detach time for the "SDL 제거까지 N ms" / 5 s notice lines)
+        std::lock_guard<std::mutex> g(listenerMu_);
+        if (disconnectListener_ && !listenerCalled_) {
+            listenerCalled_ = true;
+            disconnectListener_();
+        }
     }
     ringCv_.notify_all();
+}
+
+void WinHidPort::setDisconnectListener(std::function<void()> fn) {
+    std::lock_guard<std::mutex> g(listenerMu_);
+    disconnectListener_ = std::move(fn);
+    listenerCalled_ = false;
+    if (disconnectListener_ && disconnected_.load()) {  // detached before the listener was set
+        listenerCalled_ = true;
+        disconnectListener_();
+    }
 }
 
 arbs::IoResult WinHidPort::failWrite(unsigned long err, const char* where) {

@@ -17,6 +17,7 @@
 
 #ifdef ARBS_W
 #include "arbs/arbs_bridge.h"
+#include "arbs/arbs_numbering.h"
 #endif
 
 #ifdef Q_OS_WIN32
@@ -1668,6 +1669,15 @@ bool Session::startConnectionAsync()
 
     QString rtspSessionUrl;
 
+    bool gcPersist = !m_Preferences->multiController;
+#ifdef ARBS_W
+    // ARBS-W B2d (B3 1-1, provisional decision D-B3-1, planner has not ruled): APEX-only on -> gcpersist=1 so the host
+    // keeps and re-binds the composite DualSense on an APEX removal/re-arrival instead of creating a new one
+    // (docs/analysis/B3.md 1-1-3 option (b)). APEX-only off -> the upstream value above.
+    gcPersist = arbsw::persistGamepads(m_Preferences->multiController, m_Preferences->arbsApexOnly);
+    ArbsBridge::log(arbsw::persistGamepadsNote(m_Preferences->multiController, m_Preferences->arbsApexOnly).c_str());
+#endif
+
     try {
         NvHTTP http(m_Computer);
         http.startApp(m_Computer->currentGameId != 0 ? "resume" : "launch",
@@ -1676,7 +1686,7 @@ bool Session::startConnectionAsync()
                       enableGameOptimizations,
                       m_Preferences->playAudioOnHost,
                       m_InputHandler->getAttachedGamepadMask(),
-                      !m_Preferences->multiController,
+                      gcPersist,
                       rtspSessionUrl);
     } catch (const GfeHttpResponseException& e) {
         emit displayLaunchError(tr("Host returned error: %1").arg(e.toQString()));

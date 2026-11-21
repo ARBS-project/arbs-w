@@ -416,6 +416,17 @@ int pickShowMover(const bool* occupiedAfter, const bool* hidden, int n) {
     return -1;
 }
 
+// ---- B3 1-1 (B2d): gcpersist, provisional decision D-B3-1 ----
+bool persistGamepads(bool multiController, bool apexOnly) { return !multiController || apexOnly; }
+
+std::string persistGamepadsNote(bool multiController, bool apexOnly) {
+    const bool p = persistGamepads(multiController, apexOnly);
+    const char* why = apexOnly ? (multiController ? "APEX 단독 켬 -> 호스트 DualSense 유지·rebound(잠정 D-B3-1)"
+                                                  : "APEX 단독 켬, 단일 모드 = upstream 값")
+                               : "APEX 단독 끔 = upstream 값(단일 모드면 1)";
+    return arbs::jc::fmt("ARBS-W: 시작 요청 gcpersist=%d(%s)", p ? 1 : 0, why);
+}
+
 bool outputLenUsable(uint16_t outLen) { return outLen >= kWireSize; }
 
 size_t buildOutputReport(const uint8_t* frame32, uint16_t outLen, uint8_t* dst, size_t dstCap) {
@@ -590,6 +601,134 @@ arbs::Engine::Config toEngineConfig(const ArbsSettings& in) {
     c.triggerStrength = s.triggerStrength;
     c.verbose = s.verbose;
     return c;
+}
+
+// ---- B3 1-2 (B2d): stall lines ----
+std::string openStallLine(int64_t stallMs, int retries, const char* result) {
+    return arbs::jc::fmt("ARBS-W: IF2 열기 - 메인 스레드 정지 약 %lld ms(배타 재시도 %d회, 결과 %s)", static_cast<long long>(stallMs),
+                         retries, result != nullptr ? result : "?");
+}
+
+std::string bindStallLine(int64_t totalMs, int64_t cleanupMs, int64_t openMs) {
+    return arbs::jc::fmt("ARBS-W: APEX 묶기 메인 스레드 %lld ms(이전 포트 정리 %lld ms + IF2 열기 %lld ms)", static_cast<long long>(totalMs),
+                         static_cast<long long>(cleanupMs), static_cast<long long>(openMs));
+}
+
+// ---- B3 1-3 (B2d): IF2 detach watch, provisional decision D4 = log only ----
+int If2DetachWatch::arm() {
+    std::lock_guard<std::mutex> g(mu_);
+    gen_++;
+    armed_ = true;
+    detached_ = noticed_ = warned_ = false;
+    detachNs_ = 0;
+    firstInputNs_ = -1;
+    detachedFlag_ = false;
+    return gen_;
+}
+
+void If2DetachWatch::disarm() {
+    std::lock_guard<std::mutex> g(mu_);
+    gen_++;  // a late listener call of the old port is stale
+    armed_ = detached_ = false;
+    detachedFlag_ = false;
+}
+
+bool If2DetachWatch::onDetach(int generation, int64_t nowNs) {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!armed_ || generation != gen_ || detached_) return false;
+    detached_ = true;
+    detachNs_ = nowNs;
+    detachedFlag_ = true;
+    return true;
+}
+
+bool If2DetachWatch::onTick(int64_t nowNs) {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!armed_ || !detached_ || noticed_) return false;
+    if ((nowNs - detachNs_) / 1000000LL < kNoticeMs) return false;
+    noticed_ = true;
+    return true;
+}
+
+int64_t If2DetachWatch::onSdlRemoved(int64_t nowNs) {
+    std::lock_guard<std::mutex> g(mu_);
+    const int64_t ms = armed_ && detached_ ? (nowNs - detachNs_) / 1000000LL : -1;
+    gen_++;
+    armed_ = detached_ = false;
+    detachedFlag_ = false;
+    return ms;
+}
+
+bool If2DetachWatch::onApexInput(int64_t nowNs) {
+    if (!detachedFlag_.load()) return false;  // fast path: every APEX button/axis event comes here
+    std::lock_guard<std::mutex> g(mu_);
+    if (!armed_ || !detached_ || warned_) return false;
+    if (firstInputNs_ < 0) {
+        firstInputNs_ = nowNs;
+        return false;
+    }
+    if ((nowNs - firstInputNs_) / 1000000LL <= kInputWarnMs) return false;
+    warned_ = true;
+    return true;
+}
+
+std::string detachRemovedLine(int64_t ms) {
+    return arbs::jc::fmt("ARBS-W: IF2 분리 후 SDL 제거까지 %lld ms", static_cast<long long>(ms));
+}
+
+std::string detachNoticeLine() {
+    return "ARBS-W: IF2 분리 5초 경과 - SDL 제거 아직 없음(숨김 유지 D3; 내장 패드를 쓰려면 동글을 뽑거나 APEX 단독 끄기)";
+}
+
+std::string detachInputWarnLine() {
+    return "ARBS-W 경고: IF2 분리 상태인데 APEX 입력이 계속 들어옴 - 진동 경로 끊김(동글 다시 꽂기)";
+}
+
+// ---- B3 1-4 (B2d): first PCM after the APEX arrival, provisional decision D-B3-4 ----
+void PcmWait::arm(int64_t nowNs, int index, Kind kind) {
+    std::lock_guard<std::mutex> g(mu_);
+    startNs_ = nowNs;
+    index_ = index;
+    kind_ = kind;
+    armed_.store(true);
+}
+
+bool PcmWait::onPcm(int64_t nowNs, int index, Result* out) {
+    if (!armed_.load()) return false;  // fast path: ~200 packets/s on the receive thread
+    std::lock_guard<std::mutex> g(mu_);
+    if (!armed_.load() || index != index_) return false;
+    armed_.store(false);
+    if (out != nullptr) {
+        out->ms = (nowNs - startNs_) / 1000000LL;
+        out->index = index_;
+        out->kind = kind_;
+    }
+    return true;
+}
+
+bool PcmWait::cancel(int64_t nowNs, Result* out) {
+    std::lock_guard<std::mutex> g(mu_);
+    if (!armed_.load()) return false;
+    armed_.store(false);
+    if (out != nullptr) {
+        out->ms = (nowNs - startNs_) / 1000000LL;
+        out->index = index_;
+        out->kind = kind_;
+    }
+    return true;
+}
+
+std::string pcmWaitLine(const PcmWait::Result& r) {
+    if (r.kind == PcmWait::Kind::AfterReconnect) {
+        return arbs::jc::fmt("ARBS-W: 재연결 후 첫 PCM %lld ms(APEX 도착 보고 -> 첫 PCM, 번호 %d)", static_cast<long long>(r.ms), r.index);
+    }
+    return arbs::jc::fmt("ARBS-W: 접속 후 첫 PCM %lld ms(번호 %d)", static_cast<long long>(r.ms), r.index);
+}
+
+std::string pcmWaitNoneLine(const PcmWait::Result& r, const char* reason) {
+    return arbs::jc::fmt("ARBS-W: %s 첫 PCM 없음(%lld ms 기다림, 번호 %d, %s)",
+                         r.kind == PcmWait::Kind::AfterReconnect ? "재연결 후" : "접속 후", static_cast<long long>(r.ms), r.index,
+                         reason != nullptr ? reason : "?");
 }
 
 }  // namespace arbsw

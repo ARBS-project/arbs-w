@@ -1613,14 +1613,14 @@ TEST(b2c_if2, p02_exclusive_retry_succeeds) {
     CHECK_EQ(f.sharedCalls, 0);
     CHECK_EQ(f.sleptMs, 200);
     CHECK(log.has("IF2 열기 - 이 프로세스에 이미 열린 IF2 포트 " + std::to_string(base) + "개"));
-    CHECK(log.has("IF2 배타 열기 오류 32(공유 위반) - 100ms 간격으로 최대 5회 다시 시도"));
+    CHECK(log.has("IF2 배타 열기 오류 32(공유 위반) - 100ms 간격으로 최대 20회 다시 시도"));  // B3 1-2: was 5
     CHECK(log.has("IF2 배타 열기 성공(재시도 2회"));
     CHECK(log.has("IF2 열림(배타"));
     CHECK(!log.has("다른 프로그램이 IF2 를 쓰는 중"));
     CloseHandle(p.server);
 }
 
-// P3: error 32 on every exclusive try -> shared open after <= 0.5 s, warning kept + "0 ports of this process"
+// P3: error 32 on every exclusive try -> shared open after <= 2 s (B3 1-2: was 0.5 s), warning kept + "0 ports of this process"
 TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
     PipePair p = makePipe();
     CHECK(p.client != INVALID_HANDLE_VALUE);
@@ -1636,11 +1636,11 @@ TEST(b2c_if2, p03_exclusive_always_busy_shared_fallback) {
     }
     CHECK_EQ(f.exclusiveCalls, 1 + WinHidPort::kExclusiveRetries);
     CHECK_EQ(f.sharedCalls, 1);
-    CHECK_EQ(f.sleptMs, 500);
-    CHECK(f.sleptMs <= 500);
+    CHECK_EQ(f.sleptMs, 2000);  // B3 1-2: was 500
+    CHECK(f.sleptMs <= 2000);
     CHECK(log.has("ARBS-W 경고: 다른 프로그램이 IF2 를 쓰는 중(배타 열기 실패, 오류 32) -> 공유 모드로 엽니다. "
                   "Space Station·XHaptics·ApexSenseBridge·Steam 을 종료하세요"));
-    CHECK(log.has("배타 재시도 5회 모두 오류 32, 이 프로세스에 열린 IF2 포트 0개 - 0개면 ARBS-W 자신의 핸들이 아님"));
+    CHECK(log.has("배타 재시도 20회 모두 오류 32, 이 프로세스에 열린 IF2 포트 0개 - 0개면 ARBS-W 자신의 핸들이 아님"));  // B3 1-2: was 5
     CHECK(log.has("IF2 열림(공유"));
     CloseHandle(p.server);
     // another error: no retry, shared at once; shared also failing -> nullptr + reason
@@ -1680,7 +1680,7 @@ TEST(b2c_if2, p04_detach_then_reopen_exclusive) {
     CaptureLog busy;
     std::unique_ptr<WinHidPort> second = WinHidPort::openWith(c, busy, &why, &WinHidPort::createFileAttempt, noWait);
     CHECK(second == nullptr);
-    CHECK_EQ(slept, 500);
+    CHECK_EQ(slept, 2000);  // B3 1-2: 20 x 100 ms (was 500)
     CHECK(busy.has("이 프로세스에 열린 IF2 포트 " + std::to_string(base + 1) + "개"));
     CHECK_MSG(why == "IF2 열기 실패(공유 모드도 실패, 오류 32)", why);
     first.reset();  // = Engine::detach -> port_.reset(): reader joined, CloseHandle, events closed
@@ -1697,6 +1697,386 @@ TEST(b2c_if2, p04_detach_then_reopen_exclusive) {
     third.reset();
     CHECK_EQ(WinHidPort::openCount(), base);
     CHECK(DeleteFileW(path.c_str()) != 0);
+}
+
+// ------------------------------------------------------------------------------------------------ B3 (ARBS-W B2d)
+// docs/analysis/B3.md section 3-1: B1-B2 gcpersist, R1-R4 exclusive retry window, F1-F5 first PCM, D1-D3 IF2 detach.
+namespace {
+int64_t msNs(int64_t ms) { return ms * 1000000LL; }
+long long loggedStallMs(CaptureLog& log) {
+    std::lock_guard<std::mutex> g(log.mu);
+    const std::string key = "메인 스레드 정지 약 ";
+    for (const std::string& l : log.lines) {
+        const size_t at = l.find(key);
+        if (at != std::string::npos) return std::stoll(l.substr(at + key.size()));
+    }
+    return -1;
+}
+int countLines(CaptureLog& log, const std::string& part) {
+    std::lock_guard<std::mutex> g(log.mu);
+    int n = 0;
+    for (const std::string& l : log.lines)
+        if (l.find(part) != std::string::npos) n++;
+    return n;
+}
+}  // namespace
+
+// B1: gcpersist truth table [잠정 D-B3-1] + the launch log line
+TEST(b2d_persist, b1_truth_table_and_note) {
+    CHECK(persistGamepads(true, true));    // multi + APEX-only -> 1 (new)
+    CHECK(!persistGamepads(true, false));  // multi, APEX-only off -> 0 (upstream)
+    CHECK(persistGamepads(false, false));  // single -> 1 (upstream)
+    CHECK(persistGamepads(false, true));   // single + APEX-only -> 1 (upstream value too)
+    // APEX-only off = upstream !multiController in every mode
+    for (int m = 0; m < 2; m++) CHECK_EQ(persistGamepads(m == 1, false), m == 0);
+    CHECK_MSG(persistGamepadsNote(true, true) == "ARBS-W: 시작 요청 gcpersist=1(APEX 단독 켬 -> 호스트 DualSense 유지·rebound(잠정 D-B3-1))",
+              persistGamepadsNote(true, true));
+    CHECK_MSG(persistGamepadsNote(true, false) == "ARBS-W: 시작 요청 gcpersist=0(APEX 단독 끔 = upstream 값(단일 모드면 1))",
+              persistGamepadsNote(true, false));
+    CHECK_MSG(persistGamepadsNote(false, false) == "ARBS-W: 시작 요청 gcpersist=1(APEX 단독 끔 = upstream 값(단일 모드면 1))",
+              persistGamepadsNote(false, false));
+    CHECK_MSG(persistGamepadsNote(false, true) == "ARBS-W: 시작 요청 gcpersist=1(APEX 단독 켬, 단일 모드 = upstream 값)",
+              persistGamepadsNote(false, true));
+}
+
+// B2: APEX-only on: removal -> D1 -> reconnect sends the same packets as B2c H4/H5 (numbering rules unchanged; the host
+// side rebound is not testable here - real-device host log "rebound to resumed client")
+TEST(b2d_persist, b2_packet_order_same_as_b2c) {
+    HostSim h = simOnly(true, true, 2, true);
+    CHECK(persistGamepads(h.multi, h.apexOnly));
+    h.add(kBuiltinJs, kBuiltinVid, kBuiltinPid);
+    h.add(kApexJs, kApexV, kApexP);
+    h.packets.clear();
+    h.unplugExact(kApexJs);
+    CHECK(h.remove(kApexJs).action == BA::Unbind);
+    CHECK_MSG(h.all() == "gone0/m=0x0 mv1>0(D1) show100 A0:norm/m=0x1 in0:b=0x0/m=0x1 ", h.all());  // + current state once (B2c)
+    h.packets.clear();
+    const int again = kApexJs + 10;
+    h.listExact = true;
+    h.listExactIds = {again};
+    CHECK(h.add(again, kApexV, kApexP).action == BA::BindExact);
+    CHECK_MSG(h.all() == "mv0>1 hide100 R0/m=0x0 A0:apex/m=0x1 ", h.all());
+}
+
+// R1: error 32 x 19, then the exclusive open succeeds on the 20th retry (inside the 2 s window)
+TEST(b2d_if2, r1_exclusive_after_19_retries) {
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    FakeOpen f;
+    f.exclusiveErrors.assign(19, 32);
+    f.exclusiveErrors.push_back(0);
+    f.handle = p.client;
+    std::string why;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
+        CHECK(port != nullptr);
+        CHECK(port->exclusive());
+    }
+    CHECK_EQ(WinHidPort::kExclusiveRetries, 20);
+    CHECK_EQ(WinHidPort::kRetryDelayMs, 100);
+    CHECK_EQ(f.exclusiveCalls, 20);
+    CHECK_EQ(f.sharedCalls, 0);
+    CHECK_EQ(f.sleptMs, 1900);
+    CHECK(log.has("IF2 배타 열기 성공(재시도 19회, 약 1900ms 뒤)"));
+    CHECK(log.has("ARBS-W: IF2 열기 - 메인 스레드 정지 약 "));
+    CHECK(log.has("ms(배타 재시도 19회, 결과 배타)"));
+    CHECK(!log.has("다른 프로그램이 IF2 를 쓰는 중"));
+    CloseHandle(p.server);
+}
+
+// R2: error 32 on all 21 exclusive tries -> shared after 2,000 ms of retry waits; shared also failing -> "결과 실패"
+TEST(b2d_if2, r2_twenty_retries_then_shared) {
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    FakeOpen f;
+    f.exclusiveErrors = {32};
+    f.handle = p.client;
+    std::string why;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
+        CHECK(port != nullptr);
+        CHECK(!port->exclusive());
+    }
+    CHECK_EQ(f.exclusiveCalls, 21);
+    CHECK_EQ(f.sharedCalls, 1);
+    CHECK_EQ(f.sleptMs, 2000);
+    CHECK(log.has("배타 재시도 20회 모두 오류 32"));
+    CHECK(log.has("ms(배타 재시도 20회, 결과 공유)"));
+    CHECK_EQ(countLines(log, "메인 스레드 정지 약"), 1);
+    CloseHandle(p.server);
+    CaptureLog log2;
+    FakeOpen g;
+    g.exclusiveErrors = {32};
+    g.sharedError = 5;
+    CHECK(WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log2, &why, g.fn(), g.sleep()) == nullptr);
+    CHECK_EQ(g.sleptMs, 2000);
+    CHECK(log2.has("ms(배타 재시도 20회, 결과 실패)"));
+    CHECK_MSG(why == "IF2 열기 실패(공유 모드도 실패, 오류 5)", why);
+}
+
+// R3: not error 32 -> no retry, no stall line; first try exclusive -> no stall line
+TEST(b2d_if2, r3_no_retry_no_stall_line) {
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    FakeOpen f;
+    f.exclusiveErrors = {5};
+    f.handle = p.client;
+    std::string why;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), f.sleep());
+        CHECK(port != nullptr);
+        CHECK(!port->exclusive());
+    }
+    CHECK_EQ(f.exclusiveCalls, 1);
+    CHECK_EQ(f.sleptMs, 0);
+    CHECK(!log.has("메인 스레드 정지"));
+    CloseHandle(p.server);
+    PipePair q = makePipe();
+    CHECK(q.client != INVALID_HANDLE_VALUE);
+    CaptureLog log2;
+    FakeOpen g;
+    g.exclusiveErrors = {0};
+    g.handle = q.client;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log2, &why, g.fn(), g.sleep());
+        CHECK(port != nullptr);
+        CHECK(port->exclusive());
+    }
+    CHECK(!log2.has("메인 스레드 정지"));
+    CloseHandle(q.server);
+}
+
+// R4: the stall line is the real (steady clock) blocked time, not the planned sleep sum
+TEST(b2d_if2, r4_stall_line_is_real_time) {
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    FakeOpen f;
+    f.exclusiveErrors = {32, 32, 32, 0};
+    f.handle = p.client;
+    int planned = 0;
+    const WinHidPort::SleepFn realSleep = [&planned](int ms) {
+        planned += ms;
+        Sleep(30);  // shorter than the 100 ms asked for: the line must show ~90 ms, not 300 ms
+    };
+    std::string why;
+    {
+        std::unique_ptr<WinHidPort> port = WinHidPort::openWith(cand(L"x", kApexV, kApexP, 0xFFA0), log, &why, f.fn(), realSleep);
+        CHECK(port != nullptr);
+        CHECK(port->exclusive());
+    }
+    CHECK_EQ(planned, 300);
+    const long long ms = loggedStallMs(log);
+    CHECK_MSG(ms >= 85 && ms < 300, std::to_string(ms));
+    CHECK(log.has("ms(배타 재시도 3회, 결과 배타)"));
+    CloseHandle(p.server);
+    CHECK_MSG(openStallLine(1234, 7, "공유") == "ARBS-W: IF2 열기 - 메인 스레드 정지 약 1234 ms(배타 재시도 7회, 결과 공유)",
+              openStallLine(1234, 7, "공유"));
+    CHECK_MSG(bindStallLine(2105, 3, 2001) == "ARBS-W: APEX 묶기 메인 스레드 2105 ms(이전 포트 정리 3 ms + IF2 열기 2001 ms)",
+              bindStallLine(2105, 3, 2001));
+}
+
+// F1: arm -> first PCM of that number 1234 ms later -> one line; the second packet gives nothing
+TEST(b2d_pcm, f1_first_pcm_once) {
+    PcmWait w;
+    PcmWait::Result r;
+    CHECK(!w.onPcm(msNs(5), 0, &r));  // not armed
+    w.arm(msNs(1000), 0, PcmWait::Kind::AfterReconnect);
+    CHECK(w.armed());
+    CHECK(w.onPcm(msNs(2234), 0, &r));
+    CHECK_EQ(r.ms, 1234ll);
+    CHECK_EQ(r.index, 0);
+    CHECK(r.kind == PcmWait::Kind::AfterReconnect);
+    CHECK(!w.armed());
+    CHECK(!w.onPcm(msNs(2240), 0, &r));
+    CHECK_MSG(pcmWaitLine(r) == "ARBS-W: 재연결 후 첫 PCM 1234 ms(APEX 도착 보고 -> 첫 PCM, 번호 0)", pcmWaitLine(r));
+    PcmWait::Result none;
+    CHECK(!w.cancel(msNs(3000), &none));  // already fired -> no "없음" line
+}
+
+// F2: PCM for another number first -> only the armed number ends the wait; a second arm replaces the first
+TEST(b2d_pcm, f2_other_number_ignored) {
+    PcmWait w;
+    PcmWait::Result r;
+    w.arm(msNs(0), 0, PcmWait::Kind::AfterReconnect);
+    CHECK(!w.onPcm(msNs(10), 1, &r));
+    CHECK(w.armed());
+    CHECK(w.onPcm(msNs(20), 0, &r));
+    CHECK_EQ(r.ms, 20ll);
+    CHECK_EQ(r.index, 0);
+    w.arm(msNs(100), 0, PcmWait::Kind::AfterReconnect);
+    w.arm(msNs(150), 1, PcmWait::Kind::AfterReconnect);
+    CHECK(!w.onPcm(msNs(160), 0, &r));
+    CHECK(w.onPcm(msNs(170), 1, &r));
+    CHECK_EQ(r.ms, 20ll);
+    CHECK_EQ(r.index, 1);
+}
+
+// F3: unbind / session end before the first PCM -> "없음" line with the time waited
+TEST(b2d_pcm, f3_cancel_none_line) {
+    PcmWait w;
+    PcmWait::Result r;
+    CHECK(!w.cancel(msNs(1), &r));
+    w.arm(msNs(500), 0, PcmWait::Kind::AfterReconnect);
+    CHECK(w.cancel(msNs(12500), &r));
+    CHECK_EQ(r.ms, 12000ll);
+    CHECK(!w.armed());
+    CHECK(!w.onPcm(msNs(12600), 0, &r));
+    CHECK(!w.cancel(msNs(12700), &r));
+    PcmWait::Result n;
+    n.ms = 12000;
+    n.index = 0;
+    n.kind = PcmWait::Kind::AfterReconnect;
+    CHECK_MSG(pcmWaitNoneLine(n, "SDL 제거") == "ARBS-W: 재연결 후 첫 PCM 없음(12000 ms 기다림, 번호 0, SDL 제거)", pcmWaitNoneLine(n, "SDL 제거"));
+    n.kind = PcmWait::Kind::AfterConnect;
+    CHECK_MSG(pcmWaitNoneLine(n, "세션 종료") == "ARBS-W: 접속 후 첫 PCM 없음(12000 ms 기다림, 번호 0, 세션 종료)", pcmWaitNoneLine(n, "세션 종료"));
+}
+
+// F4: first arrival of the session = "접속 후", later arrivals = "재연결 후"
+TEST(b2d_pcm, f4_connect_vs_reconnect) {
+    CHECK(PcmWait::kindFor(0) == PcmWait::Kind::AfterConnect);
+    CHECK(PcmWait::kindFor(1) == PcmWait::Kind::AfterReconnect);
+    CHECK(PcmWait::kindFor(7) == PcmWait::Kind::AfterReconnect);
+    PcmWait w;
+    PcmWait::Result r;
+    int arrivals = 0;  // = Impl::apexArrivalsThisSession
+    w.arm(msNs(0), 0, PcmWait::kindFor(arrivals++));
+    CHECK(w.onPcm(msNs(21000), 0, &r));
+    CHECK_MSG(pcmWaitLine(r) == "ARBS-W: 접속 후 첫 PCM 21000 ms(번호 0)", pcmWaitLine(r));
+    w.arm(msNs(30000), 0, PcmWait::kindFor(arrivals++));
+    CHECK(w.onPcm(msNs(30800), 0, &r));
+    CHECK_MSG(pcmWaitLine(r) == "ARBS-W: 재연결 후 첫 PCM 800 ms(APEX 도착 보고 -> 첫 PCM, 번호 0)", pcmWaitLine(r));
+}
+
+// F5: arm on this thread, onPcm hammered from two other threads (armed number + another number): one record per arm
+TEST(b2d_pcm, f5_threads_one_record_per_arm) {
+    PcmWait w;
+    std::atomic<bool> stop{false};
+    std::atomic<int> fired{0}, wrong{0};
+    std::thread rx([&] {
+        PcmWait::Result r;
+        while (!stop.load()) {
+            if (w.onPcm(msNs(1), 0, &r)) {
+                if (r.index != 0) wrong++;
+                fired++;
+            }
+        }
+    });
+    std::thread other([&] {
+        PcmWait::Result r;
+        while (!stop.load())
+            if (w.onPcm(msNs(1), 3, &r)) wrong++;
+    });
+    bool allFired = true;
+    for (int i = 0; i < 1000; i++) {
+        w.arm(0, 0, PcmWait::Kind::AfterReconnect);
+        // yield-spin (waitFor sleeps 2 ms = ~15 ms on Windows; 1,000 rounds would take ~15 s)
+        const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (fired.load() != i + 1 && std::chrono::steady_clock::now() < end) std::this_thread::yield();
+        if (fired.load() != i + 1) {
+            allFired = false;
+            break;
+        }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    stop = true;
+    rx.join();
+    other.join();
+    CHECK(allFired);
+    CHECK_EQ(fired.load(), 1000);
+    CHECK_EQ(wrong.load(), 0);
+}
+
+// D1: IF2 detach -> 5 s notice once / SDL removal first -> no notice + "SDL 제거까지 N ms"
+TEST(b2d_detach, d1_notice_and_removal_time) {
+    If2DetachWatch w;
+    CHECK(!w.onDetach(1, msNs(0)));  // not armed
+    const int gen = w.arm();
+    CHECK(!w.onTick(msNs(10000)));  // armed, not detached
+    CHECK(w.onDetach(gen, msNs(1000)));
+    CHECK(!w.onDetach(gen, msNs(1100)));  // once
+    CHECK(w.detached());
+    CHECK(!w.onTick(msNs(5999)));  // 4,999 ms
+    CHECK(w.onTick(msNs(6000)));   // 5,000 ms
+    CHECK(!w.onTick(msNs(7000)));  // once
+    CHECK_EQ(w.onSdlRemoved(msNs(9500)), 8500ll);
+    CHECK(!w.detached());
+    CHECK_EQ(w.onSdlRemoved(msNs(9600)), -1ll);
+    // SDL removal before 5 s -> no notice
+    const int g2 = w.arm();
+    CHECK(w.onDetach(g2, msNs(20000)));
+    CHECK(!w.onTick(msNs(21000)));
+    CHECK_EQ(w.onSdlRemoved(msNs(21234)), 1234ll);
+    CHECK(!w.onTick(msNs(30000)));
+    // no detach before the SDL removal -> -1 (no line)
+    w.arm();
+    CHECK_EQ(w.onSdlRemoved(msNs(40000)), -1ll);
+    CHECK(If2DetachWatch::kNoticeMs == 5000);
+    CHECK_MSG(detachRemovedLine(8500) == "ARBS-W: IF2 분리 후 SDL 제거까지 8500 ms", detachRemovedLine(8500));
+    CHECK_MSG(detachNoticeLine() == "ARBS-W: IF2 분리 5초 경과 - SDL 제거 아직 없음(숨김 유지 D3; 내장 패드를 쓰려면 동글을 뽑거나 APEX 단독 끄기)",
+              detachNoticeLine());
+}
+
+// D2: detached + APEX SDL input for more than 2 s -> one warning; input before the detach does not count
+TEST(b2d_detach, d2_input_while_detached_warns_once) {
+    If2DetachWatch w;
+    const int gen = w.arm();
+    CHECK(!w.onApexInput(msNs(0)));
+    CHECK(!w.onApexInput(msNs(5000)));  // not detached: never
+    CHECK(w.onDetach(gen, msNs(6000)));
+    CHECK(!w.onApexInput(msNs(6100)));  // first input after the detach
+    CHECK(!w.onApexInput(msNs(8100)));  // 2,000 ms: not "more than"
+    CHECK(w.onApexInput(msNs(8101)));   // 2,001 ms
+    CHECK(!w.onApexInput(msNs(9000)));  // once
+    CHECK(If2DetachWatch::kInputWarnMs == 2000);
+    CHECK_MSG(detachInputWarnLine() == "ARBS-W 경고: IF2 분리 상태인데 APEX 입력이 계속 들어옴 - 진동 경로 끊김(동글 다시 꽂기)",
+              detachInputWarnLine());
+    // a new bind clears the state
+    const int g2 = w.arm();
+    CHECK(!w.detached());
+    CHECK(w.onDetach(g2, msNs(10000)));
+    CHECK(!w.onApexInput(msNs(10001)));
+    CHECK(w.onApexInput(msNs(12100)));
+}
+
+// D3: stale generations (old port after re-bind / unbind) are ignored; the real port calls its listener exactly once
+TEST(b2d_detach, d3_stale_generation_and_port_listener) {
+    If2DetachWatch w;
+    const int g1 = w.arm();
+    const int g2 = w.arm();
+    CHECK(g1 != g2);
+    CHECK(!w.onDetach(g1, msNs(1)));
+    CHECK(!w.detached());
+    w.disarm();
+    CHECK(!w.onDetach(g2, msNs(2)));
+    CHECK(!w.onTick(msNs(100000)));
+    // port over a pipe: the other end goes away -> listener once (reader thread); set after the detach -> called at once
+    PipePair p = makePipe();
+    CHECK(p.client != INVALID_HANDLE_VALUE);
+    CaptureLog log;
+    std::atomic<int> calls{0};
+    {
+        WinHidPort port(p.client, 33, 33, log, true);
+        const int gen = w.arm();
+        port.setDisconnectListener([&calls, &w, gen] {
+            calls++;
+            w.onDetach(gen, msNs(50));
+        });
+        CloseHandle(p.server);
+        p.server = INVALID_HANDLE_VALUE;
+        CHECK(waitFor([&] { return calls.load() == 1; }, 2000));
+        uint8_t frame[32] = {};
+        CHECK(port.writeFrame(frame, 100) == arbs::IoResult::Disconnected);
+        CHECK(w.detached());
+        std::atomic<int> late{0};
+        port.setDisconnectListener([&late] { late++; });
+        CHECK_EQ(late.load(), 1);
+    }
+    CHECK_EQ(calls.load(), 1);
+    CHECK(waitFor([&] { return log.has("IF2 분리 감지"); }, 2000));
 }
 
 int main(int argc, char** argv) {
