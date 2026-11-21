@@ -807,4 +807,30 @@ std::string logHeaderLine(const char* edition, const char* moonlightVersion) {
            (moonlightVersion != nullptr ? moonlightVersion : "?") + " + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음";
 }
 
+// ---- B4b (ARBS-W b2g) F1/F2 (D-B4b-1) ----
+namespace {
+const char* srcWord(bool fromFile) { return fromFile ? "파일" : "기본값"; }
+const char* storeWord(const PrefsSource& p) {
+    if (!p.iniFormat) return "레지스트리";
+    return p.iniExists ? "있음" : "없음";
+}
+}  // namespace
+
+std::string prefsSourceLine(const PrefsSource& p) {
+    const std::string store = p.iniFormat ? std::string("설정 파일 ") + storeWord(p) : std::string("설정 저장소=레지스트리(포터블 아님)");
+    return "ARBS-W: " + store + " · 마우스 흉내=" + (p.gamepadMouse ? "켬" : "끔") + "(" + srcWord(p.gamepadMouseFromFile) +
+           ") · 차단 검사=" + (p.netBlock ? "켬" : "끔") + "(" + srcWord(p.netBlockFromFile) + ") · 무음=모드" +
+           std::to_string(p.silence) + "(" + srcWord(p.silenceFromFile) + ")";
+}
+
+std::string prefsDumpText(const PrefsSource& p, const char* edition) {
+    std::string s;
+    s += std::string("edition=") + (edition != nullptr && *edition != '\0' ? edition : "dev") + "\n";
+    s += std::string("ini=") + storeWord(p) + "\n";
+    s += std::string("gamepadmouse=") + (p.gamepadMouse ? "true" : "false") + " 출처=" + srcWord(p.gamepadMouseFromFile) + "\n";
+    s += std::string("detectnetblocking=") + (p.netBlock ? "true" : "false") + " 출처=" + srcWord(p.netBlockFromFile) + "\n";
+    s += "arbssilence=" + std::to_string(p.silence) + " 출처=" + srcWord(p.silenceFromFile) + "\n";
+    return s;
+}
+
 }  // namespace arbsw

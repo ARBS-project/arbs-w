@@ -2371,6 +2371,43 @@ TEST(b4_w, log_header_edition) {
     CHECK(logHeaderLine("b2f", "6.2.0").find("B2d") == std::string::npos);
 }
 
+// B4b F1 (D-B4b-1, ARBS-W b2g): startup line says where gamepadmouse / detectnetblocking / arbssilence came from
+TEST(b4b_w, prefs_source_line) {
+    PrefsSource p;  // portable, no INI, all defaults
+    p.iniFormat = true;
+    CHECK_MSG(prefsSourceLine(p) == "ARBS-W: 설정 파일 없음 · 마우스 흉내=끔(기본값) · 차단 검사=끔(기본값) · 무음=모드1(기본값)",
+              prefsSourceLine(p));
+    p.iniExists = true;
+    p.gamepadMouse = true;
+    p.gamepadMouseFromFile = true;
+    p.netBlockFromFile = true;
+    p.silence = 4;
+    p.silenceFromFile = true;
+    CHECK_MSG(prefsSourceLine(p) == "ARBS-W: 설정 파일 있음 · 마우스 흉내=켬(파일) · 차단 검사=끔(파일) · 무음=모드4(파일)",
+              prefsSourceLine(p));
+    PrefsSource r;  // standard install (registry)
+    CHECK(prefsSourceLine(r).rfind("ARBS-W: 설정 저장소=레지스트리(포터블 아님) · ", 0) == 0);
+    // no path-like text
+    CHECK(prefsSourceLine(p).find('\\') == std::string::npos && prefsSourceLine(p).find(':', 8) == std::string::npos);
+}
+
+// B4b F2 (D-B4b-1): --arbs-dump-prefs body parsed by client-w/scripts/arbs-w-exe-defaults-test.ps1 (exact keys)
+TEST(b4b_w, prefs_dump_text) {
+    PrefsSource p;
+    p.iniFormat = true;
+    CHECK_MSG(prefsDumpText(p, "b2g") ==
+                  "edition=b2g\nini=없음\ngamepadmouse=false 출처=기본값\ndetectnetblocking=false 출처=기본값\n"
+                  "arbssilence=1 출처=기본값\n",
+              prefsDumpText(p, "b2g"));
+    p.iniExists = true;
+    p.gamepadMouse = true;
+    p.gamepadMouseFromFile = true;
+    const std::string t = prefsDumpText(p, nullptr);
+    CHECK_MSG(t.find("edition=dev\nini=있음\ngamepadmouse=true 출처=파일\ndetectnetblocking=false 출처=기본값\n") == 0, t);
+    PrefsSource r;
+    CHECK(prefsDumpText(r, "").find("edition=dev\nini=레지스트리\n") == 0);
+}
+
 // B4 [잠정 D-B4-5] (ARBS-W b2f): error 32 twice in one stream session -> the long warning once, then the short info line;
 // the stall line on both; resetSessionNotices() (= next onStreamLive) -> the warning once again
 TEST(b4_w, error32_warning_once_per_session) {

@@ -57,6 +57,7 @@
 
 #ifdef ARBS_W
 #include "arbs/arbs_bridge.h"
+#include <cstring>
 #endif
 
 #if defined(Q_OS_WIN32)
@@ -469,6 +470,16 @@ int main(int argc, char *argv[])
         // Initialize paths for standard installation
         Path::initialize(false);
     }
+
+#ifdef ARBS_W
+    // ARBS-W B4b F2 (D-B4b-1): "--arbs-dump-prefs" -> write the startup defaults and their source next to the exe and
+    // quit, before the Moonlight/ARBS logs, the APEX engine, SDL init and QGuiApplication (no device I/O, no save()).
+    for (int i = 1; i < argc; i++) {
+        if (argv[i] != nullptr && strcmp(argv[i], "--arbs-dump-prefs") == 0) {
+            return ArbsBridge::dumpPrefs();
+        }
+    }
+#endif
 
     // Override the default QML cache directory with the one we chose
     if (qEnvironmentVariableIsEmpty("QML_DISK_CACHE_PATH")) {

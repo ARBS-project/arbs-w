@@ -409,6 +409,25 @@ void ArbsBridge::fixPortableWorkingDir() {
     }
 }
 
+int ArbsBridge::dumpPrefs() {
+    wchar_t exe[MAX_PATH * 4];
+    const DWORD n = GetModuleFileNameW(nullptr, exe, static_cast<DWORD>(sizeof(exe) / sizeof(exe[0])));
+    if (n == 0 || n >= sizeof(exe) / sizeof(exe[0])) return 4;
+    std::wstring dir(exe, n);
+    const size_t slash = dir.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return 4;
+    dir.resize(slash);
+    // Portable only: without portable.dat, QSettings would read HKCU -> do not touch it.
+    if (GetFileAttributesW((dir + L"\\portable.dat").c_str()) == INVALID_FILE_ATTRIBUTES) return 3;
+    const StreamingPreferences* prefs = StreamingPreferences::get();  // reload() only - save() is never called here
+    const std::string body = arbsw::prefsDumpText(prefs->arbsSource, arbsw::editionName());
+    QFile f(QString::fromStdWString(dir + L"\\arbs-prefs-dump.txt"));
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return 4;
+    const qint64 w = f.write(body.data(), static_cast<qint64>(body.size()));
+    f.close();
+    return w == static_cast<qint64>(body.size()) ? 0 : 4;
+}
+
 void ArbsBridge::applySdlHintsEarly() {
     // Process environment first (SDL reads hints from the environment too), then OVERRIDE hints, which win over any
     // environment value SDL may have captured earlier. Nothing outside this process is changed.

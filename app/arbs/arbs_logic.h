@@ -337,4 +337,12 @@ const char* editionName();
 // "ARBS-W <edition> 로그 - Moonlight <version> + ARBS Core (APEX 햅틱). IP·토큰·PIN 은 기록하지 않음"
 std::string logHeaderLine(const char* edition, const char* moonlightVersion);
 
+// ---- B4b (ARBS-W b2g) F1/F2 (D-B4b-1): defaults source ----
+// Startup log line: "ARBS-W: 설정 파일 없음 · 마우스 흉내=끔(기본값) · 차단 검사=끔(기본값) · 무음=모드1(기본값)"
+// ("설정 파일 있음" / "설정 저장소=레지스트리(포터블 아님)", "켬", "(파일)"). No paths.
+std::string prefsSourceLine(const PrefsSource& p);
+// --arbs-dump-prefs file body (UTF-8, '\n' lines):
+//   edition=<e>\n ini=없음|있음|레지스트리\n gamepadmouse=false 출처=기본값|파일\n detectnetblocking=... \n arbssilence=N 출처=...
+std::string prefsDumpText(const PrefsSource& p, const char* edition);
+
 }  // namespace arbsw

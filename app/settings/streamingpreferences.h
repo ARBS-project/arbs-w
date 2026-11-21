@@ -239,6 +239,8 @@ public:
     bool arbsApexFirst;
     bool arbsApexOnly;
     bool checkForUpdates;
+    // B4b F1/F2 (D-B4b-1): where gamepadmouse / detectnetblocking / arbssilence came from at the last reload()
+    arbsw::PrefsSource arbsSource;
 
 signals:
     void displayModeChanged();

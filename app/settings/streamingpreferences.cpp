@@ -11,10 +11,12 @@
 #include <QtDebug>
 #include <QDesktopServices>
 #include <QUrl>
+#include <QFileInfo>
 
 #include "path.h"
 #ifdef ARBS_W
 #include "arbs/arbs_bridge.h"
+#include "arbs/arbs_logic.h"
 #endif
 
 #define SER_STREAMSETTINGS "streamsettings"
@@ -220,6 +222,21 @@ void StreamingPreferences::reload()
         setArbsSettings(arbsw::settings::normalize(s));
     }
     checkForUpdates = settings.value(SER_CHECKFORUPDATES, false).toBool();
+
+    // B4b F1/F2 (D-B4b-1): record the source of the defaults in question (key present in the settings file or not).
+    // Read only - nothing is written here. The ARBS log line is a no-op before ArbsBridge::initEarly (dump mode).
+    arbsSource = arbsw::PrefsSource();
+    arbsSource.iniFormat = settings.format() == QSettings::IniFormat;
+    arbsSource.iniExists = arbsSource.iniFormat && QFileInfo::exists(settings.fileName());
+    arbsSource.gamepadMouse = gamepadMouse;
+    arbsSource.gamepadMouseFromFile = settings.contains(SER_GAMEPADMOUSE);
+    arbsSource.netBlock = detectNetworkBlocking;
+    arbsSource.netBlockFromFile = settings.contains(SER_DETECTNETBLOCKING);
+    arbsSource.silence = arbsSilence;
+    arbsSource.silenceFromFile = settings.contains(SER_ARBS_SILENCE);
+#ifdef ARBS_W
+    ArbsBridge::log(arbsw::prefsSourceLine(arbsSource).c_str());
+#endif
 
 
     // Perform default settings updates as required based on last default version

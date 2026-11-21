@@ -33,6 +33,11 @@ public:
     // Before the portable.dat check: if the exe folder has portable.dat and the working folder differs, switch the
     // working folder to the exe folder (prevents HKCU/%LOCALAPPDATA% writes when started from a shortcut).
     static void fixPortableWorkingDir();
+    // B4b F2 (D-B4b-1): hidden "--arbs-dump-prefs". Called right after the portable QSettings path is set, before the
+    // ARBS log, the engine, SDL init and QGuiApplication. No portable.dat next to the exe -> returns 3 without reading
+    // anything (no registry access). Otherwise reads StreamingPreferences::get() (never save()) and writes
+    // <exe folder>\arbs-prefs-dump.txt (UTF-8, no BOM; arbsw::prefsDumpText) -> 0, write failure -> 4.
+    static int dumpPrefs();
     // First thing in main(), before any SDL call: SDL_HIDAPI_IGNORE_DEVICES += 0x37d7/0x2502 and
     // SDL_JOYSTICK_HIDAPI_FLYDIGI=0 as process environment variables and as OVERRIDE hints (design 4-4).
     static void applySdlHintsEarly();

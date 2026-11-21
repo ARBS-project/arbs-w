@@ -23,6 +23,19 @@ struct ArbsSettings {
     bool apexOnly = true;       // B2c 2-1: APEX only - other pads hidden from the host while the APEX is (or may be) bound
 };
 
+// B4b F1/F2 (D-B4b-1): where the values read at startup came from - the settings file had the key ("file") or the
+// built-in default was used ("default"). Filled by StreamingPreferences::reload(); no paths, addresses or keys.
+struct PrefsSource {
+    bool iniFormat = false;            // portable INI (false = standard install, registry)
+    bool iniExists = false;            // the INI file existed when the settings were read
+    bool gamepadMouse = false;         // value in use
+    bool gamepadMouseFromFile = false;
+    bool netBlock = false;             // detectnetblocking value in use
+    bool netBlockFromFile = false;
+    int silence = 1;                   // arbssilence value in use (after normalisation)
+    bool silenceFromFile = false;
+};
+
 namespace settings {
 
 constexpr int kAmpValues[] = {0, 10, 20, 30, 40, 50, 60, 80, 100, 127};
