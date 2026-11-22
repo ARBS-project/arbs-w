@@ -7,3 +7,22 @@ build/
 libs/
 config.tests/*/.qmake.stash
 config.tests/*/Makefile
+
+# ARBS (R0): build outputs, logs, signing material and secrets
+*.log
+*.zip
+*.zip.sha256
+*.apk
+*.aab
+*.jks
+*.keystore
+keystore.properties
+*.p12
+*.pfx
+*.pem
+*.key
+.env
+local.properties
+build*.out
+evidence/
+out/
