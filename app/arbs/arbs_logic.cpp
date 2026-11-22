@@ -280,6 +280,12 @@ void ApexBinder::reset() {
 
 bool ApexBinder::seen(int js) const { return std::find(seen_.begin(), seen_.end(), js) != seen_.end(); }
 
+bool ApexBinder::markSeen(int js, uint16_t vid, uint16_t pid) {  // B5 D-B5-4
+    if (js < 0 || !isExactVidPid(vid, pid)) return false;
+    if (std::find(seen_.begin(), seen_.end(), js) == seen_.end()) seen_.push_back(js);
+    return true;
+}
+
 bool ApexBinder::removalNeedsIf2(int js) const {
     if (js != boundJs_) return false;
     for (const Pad& p : pads_)
@@ -472,6 +478,7 @@ bool isStateLine(const std::string& line) {
     static const char* const kKeys[] = {
         "준비됨", "햅틱 불가", "UNSUPPORTED", "정지 시퀀스 시작", "정지 완료", "세션 시작", "엔진 스레드 종료", "엔진 종료 요청",
         "다시 연결", "재개 요청", "GetInfo:", "세션 요약", "엔진 예외", "전송 실패", "컨트롤러 번호", "ARBS-W",
+        "트리거 햅틱 없음",  // B5 D-B5-1
     };
     for (const char* k : kKeys) {
         if (line.find(k) != std::string::npos) return true;

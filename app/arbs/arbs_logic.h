@@ -112,6 +112,10 @@ public:
     // B2c 2-1: onPadAdded() was called for [js] in this session (bound or not). A 37d7/2502 game controller in the SDL
     // list that was never seen may still bind -> APEX-only mode keeps the other pads hidden until it is handled.
     bool seen(int js) const;
+    // B5 D-B5-4 (verify B2c 6-5): a 37d7/2502 DEVICEADDED that gamepad.cpp dropped before onPadAdded() (open failed, no
+    // free slot, ignored GUID) counts as handled, so exactPending() does not stay true for the whole session. Returns
+    // true when [js] was marked (37d7/2502 and js >= 0); other pads are ignored (false).
+    bool markSeen(int js, uint16_t vid, uint16_t pid);
 
 private:
     struct Pad {

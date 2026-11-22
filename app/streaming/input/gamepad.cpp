@@ -588,6 +588,13 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "Failed to open gamepad: %s",
                          SDL_GetError());
+#ifdef ARBS_W
+            // B5 D-B5-4: a 37d7/2502 pad that cannot be opened must not keep the APEX-only hiding pending
+            if (ArbsBridge::onArrivalDropped(SDL_JoystickGetDeviceInstanceID(event->which), SDL_JoystickGetDeviceVendor(event->which),
+                                             SDL_JoystickGetDeviceProduct(event->which), "열기 실패")) {
+                arbsSyncHidden(nullptr);
+            }
+#endif
             return;
         }
 
@@ -646,7 +653,17 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
         if (i == MAX_GAMEPADS) {
             SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                          "No open gamepad slots found!");
+#ifdef ARBS_W
+            const bool arbsDropped = ArbsBridge::onArrivalDropped(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)),
+                                                                  SDL_GameControllerGetVendor(controller),
+                                                                  SDL_GameControllerGetProduct(controller), "빈 칸 없음");
+#endif
             SDL_GameControllerClose(controller);
+#ifdef ARBS_W
+            if (arbsDropped) {
+                arbsSyncHidden(nullptr);  // B5 D-B5-4
+            }
+#endif
             return;
         }
 
@@ -657,7 +674,17 @@ void SdlInputHandler::handleControllerDeviceEvent(SDL_ControllerDeviceEvent* eve
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                         "Skipping ignored device with GUID: %s",
                         guidStr);
+#ifdef ARBS_W
+            const bool arbsDropped = ArbsBridge::onArrivalDropped(SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(controller)),
+                                                                  SDL_GameControllerGetVendor(controller),
+                                                                  SDL_GameControllerGetProduct(controller), "무시 GUID");
+#endif
             SDL_GameControllerClose(controller);
+#ifdef ARBS_W
+            if (arbsDropped) {
+                arbsSyncHidden(nullptr);  // B5 D-B5-4
+            }
+#endif
             return;
         }
 

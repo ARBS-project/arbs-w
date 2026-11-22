@@ -701,6 +701,13 @@ bool ArbsBridge::exactPending() {
     return false;
 }
 
+bool ArbsBridge::onArrivalDropped(int joystickId, uint16_t sdlVid, uint16_t sdlPid, const char* why) {  // B5 D-B5-4
+    if (g_impl == nullptr) return false;
+    if (!g_impl->binder.markSeen(joystickId, sdlVid, sdlPid)) return false;
+    logLine(arbs::jc::fmt("ARBS-W: 37d7/2502 도착 처리 못 함(%s) - 숨김 보류 해제", why != nullptr ? why : "?"));
+    return true;
+}
+
 void ArbsBridge::log(const char* line) {
     if (line != nullptr) logLine(line);
 }

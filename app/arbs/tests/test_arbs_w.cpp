@@ -190,6 +190,7 @@ TEST(w_log, state_line_filter) {
     CHECK(isStateLine("APEX 정지 시퀀스 시작: 사용자 정지"));
     CHECK(isStateLine("ARBS 세션 요약: 총 시간 00:01:00 (세션 종료)"));
     CHECK(isStateLine("ARBS-W: APEX 도착 보고 번호 0"));
+    CHECK(isStateLine("APEX 트리거 햅틱 없음: features=0x80(0x10 꺼짐) - 트리거 채널 활성·트리거 프레임 보내지 않음, 그립은 유지"));  // B5
     // 1 s / 1 min lines stay in the ARBS log only
     CHECK(!isStateLine("APEX 송신: 125프레임/초(구동 120, 중립 5, rumble 0) 큐=3"));
     CHECK(!isStateLine("APEX 레벨: 리미터동작 0.0% 상한도달 0.0% 게이트닫힘 0.0%"));
@@ -2528,6 +2529,34 @@ TEST(b3b_f2, d1_open_to_detach_over_pipe) {
         }
         CHECK(log.has("ms(GetInfo 송신 전, 0x53 송신 전)"));
     }
+}
+
+// B5 D-B5-4 (verify B2c 6-5): a 37d7/2502 DEVICEADDED dropped before onPadAdded() (open failed / no free slot / ignored
+// GUID) is marked seen -> exactPending() ends and the hidden pads may be shown again. Other pads are ignored.
+TEST(b5_w, mark_seen_dropped_exact_arrival) {
+    ApexBinder b;
+    CHECK(!b.seen(kApexJs));
+    CHECK(b.markSeen(kApexJs, kApexV, kApexP));
+    CHECK(b.seen(kApexJs));
+    CHECK(b.markSeen(kApexJs, kApexV, kApexP));  // twice: still one entry, still true
+    CHECK_EQ(b.boundJs(), ApexBinder::kNone);   // marking never binds
+    CHECK_EQ(b.padCount(), static_cast<size_t>(0));
+    b.reset();
+    CHECK(!b.seen(kApexJs));
+    CHECK(!b.markSeen(kBuiltinJs, kBuiltinVid, kBuiltinPid));  // not 37d7/2502 -> ignored
+    CHECK(!b.seen(kBuiltinJs));
+    CHECK(!b.markSeen(-1, kApexV, kApexP));  // SDL error id
+    CHECK(!b.seen(-1));
+    // APEX-only: the built-in pad is hidden while the dropped APEX is pending, visible again after markSeen
+    HostSim h(true, true, 2);
+    h.listExactIds = {kApexJs};
+    h.listExact = true;
+    CHECK(h.pending());
+    CHECK(hideOther(true, false, h.anyBound(), h.pending()));
+    CHECK(h.binder.markSeen(kApexJs, kApexV, kApexP));
+    CHECK(!h.pending());
+    CHECK(!hideOther(true, false, h.anyBound(), h.pending()));
+    mt::report().push_back("b5 D-B5-4: dropped 37d7/2502 arrival -> markSeen -> exactPending false -> other pads shown; 045e/028e and id -1 ignored");
 }
 
 int main(int argc, char** argv) {

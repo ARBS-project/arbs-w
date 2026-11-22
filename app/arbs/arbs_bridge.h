@@ -75,6 +75,9 @@ public:
     // session (it may still bind) -> APEX-only mode keeps the other pads hidden. A handled pad that did not bind is not
     // pending (analysis "exactBindFailed").
     static bool exactPending();
+    // B5 D-B5-4: gamepad.cpp dropped a DEVICEADDED before onGamepadAdded() ([why] = open failed / no free slot /
+    // ignored GUID). A 37D7/2502 pad is marked as handled + 1 log line -> true (caller re-syncs hidden pads).
+    static bool onArrivalDropped(int joystickId, uint16_t sdlVid, uint16_t sdlPid, const char* why);
     static void log(const char* line);                        // one ARBS log line (UTF-8)
     static uint32_t apexCaps(uint32_t sdlCaps);
     static uint8_t apexType();
