@@ -278,7 +278,7 @@ TEST(w_settings, asb_defaults_and_normalize) {
     CHECK_EQ(d.amp, 127);
     CHECK_NEAR(d.gain, 1.0, 0);
     CHECK_EQ(d.gatePct, 0);
-    CHECK_EQ(d.silence, 1);
+    CHECK_EQ(d.silence, 4);  // D-B4c-1: W default 4 (ASB = 1)
     CHECK_EQ(d.curve, 0);
     CHECK_EQ(d.taps, 321);
     CHECK_EQ(d.jitterFixedMs, 0);
@@ -302,7 +302,7 @@ TEST(w_settings, asb_defaults_and_normalize) {
     CHECK_EQ(n.amp, 127);
     CHECK_NEAR(n.gain, 1.0, 0);
     CHECK_EQ(n.gatePct, 0);
-    CHECK_EQ(n.silence, 1);
+    CHECK_EQ(n.silence, 4);  // out-of-list -> W default 4 (D-B4c-1)
     CHECK_EQ(n.curve, 0);
     CHECK_EQ(n.taps, 321);
     CHECK_EQ(n.jitterFixedMs, 0);
@@ -331,7 +331,8 @@ TEST(w_settings, engine_config_mapping) {
     CHECK_NEAR(c.gain, def.gain, 0);
     CHECK_EQ(c.jitterFixedMs, def.jitterFixedMs);
     CHECK_NEAR(c.gatePct, def.gatePct, 0);
-    CHECK_EQ(c.silence, def.silence);
+    CHECK_EQ(c.silence, 4);  // D-B4c-1/6: W default 4, core Engine::Config default stays 1 (ARBS-A)
+    CHECK_EQ(def.silence, 1);
     CHECK_EQ(c.asbCurve, def.asbCurve);
     CHECK_EQ(c.taps, def.taps);
     CHECK_EQ(c.triggerHaptics, def.triggerHaptics);
@@ -341,7 +342,7 @@ TEST(w_settings, engine_config_mapping) {
     s.amp = 60;
     s.gain = 2.0;
     s.gatePct = 2;
-    s.silence = 4;
+    s.silence = 2;  // non-default (W default is 4)
     s.curve = 1;
     s.taps = 161;
     s.jitterFixedMs = 32;
@@ -352,7 +353,7 @@ TEST(w_settings, engine_config_mapping) {
     CHECK_EQ(c.cap, 60);
     CHECK_NEAR(c.gain, 2.0, 0);
     CHECK_NEAR(c.gatePct, 2.0, 0);
-    CHECK_EQ(c.silence, 4);
+    CHECK_EQ(c.silence, 2);
     CHECK(!c.asbCurve);
     CHECK_EQ(c.taps, 161);
     CHECK_EQ(c.jitterFixedMs, 32);
@@ -2375,15 +2376,15 @@ TEST(b4_w, log_header_edition) {
 TEST(b4b_w, prefs_source_line) {
     PrefsSource p;  // portable, no INI, all defaults
     p.iniFormat = true;
-    CHECK_MSG(prefsSourceLine(p) == "ARBS-W: 설정 파일 없음 · 마우스 흉내=끔(기본값) · 차단 검사=끔(기본값) · 무음=모드1(기본값)",
+    CHECK_MSG(prefsSourceLine(p) == "ARBS-W: 설정 파일 없음 · 마우스 흉내=끔(기본값) · 차단 검사=끔(기본값) · 무음=모드4(기본값)",
               prefsSourceLine(p));
     p.iniExists = true;
     p.gamepadMouse = true;
     p.gamepadMouseFromFile = true;
     p.netBlockFromFile = true;
-    p.silence = 4;
+    p.silence = 1;  // file value other than the default (D-B4c-1: default 4)
     p.silenceFromFile = true;
-    CHECK_MSG(prefsSourceLine(p) == "ARBS-W: 설정 파일 있음 · 마우스 흉내=켬(파일) · 차단 검사=끔(파일) · 무음=모드4(파일)",
+    CHECK_MSG(prefsSourceLine(p) == "ARBS-W: 설정 파일 있음 · 마우스 흉내=켬(파일) · 차단 검사=끔(파일) · 무음=모드1(파일)",
               prefsSourceLine(p));
     PrefsSource r;  // standard install (registry)
     CHECK(prefsSourceLine(r).rfind("ARBS-W: 설정 저장소=레지스트리(포터블 아님) · ", 0) == 0);
@@ -2397,7 +2398,7 @@ TEST(b4b_w, prefs_dump_text) {
     p.iniFormat = true;
     CHECK_MSG(prefsDumpText(p, "b2g") ==
                   "edition=b2g\nini=없음\ngamepadmouse=false 출처=기본값\ndetectnetblocking=false 출처=기본값\n"
-                  "arbssilence=1 출처=기본값\n",
+                  "arbssilence=4 출처=기본값\n",
               prefsDumpText(p, "b2g"));
     p.iniExists = true;
     p.gamepadMouse = true;

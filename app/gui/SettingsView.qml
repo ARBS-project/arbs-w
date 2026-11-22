@@ -1540,7 +1540,7 @@ Flickable {
             }
         }
 
-        // ARBS-W (B2 D9): APEX 6 Pro haptics (ARBS Core). Defaults = ApexSenseBridge defaults.
+        // ARBS-W (B2 D9): APEX 6 Pro haptics (ARBS Core). Defaults = ApexSenseBridge defaults, except silence (mode 4, D-B4c-1).
         // Changes apply from the next stream start (same as ARBS-A).
         GroupBox {
             id: arbsSettingsGroupBox
@@ -1603,12 +1603,12 @@ Flickable {
 
                 ArbsChoice {
                     id: arbsSilenceChoice
-                    title: "Silence handling (ASB default mode 1)"
+                    title: "Silence handling (default mode 4, ASB = mode 1)"
                     prefKey: "arbsSilence"
-                    options: [ {text: "Mode 1: neutral keepalive every 50 ms (ASB default)", val: 1},
+                    options: [ {text: "Mode 1: neutral keepalive every 50 ms (ASB)", val: 1},
                                {text: "Mode 2: neutral keepalive every 200 ms", val: 2},
                                {text: "Mode 3: suspend grip after 2 s of silence", val: 3},
-                               {text: "Mode 4: send nothing while silent", val: 4} ]
+                               {text: "Mode 4: send nothing while silent (default)", val: 4} ]
                 }
 
                 ArbsChoice {
@@ -1694,7 +1694,7 @@ Flickable {
 
                     Button {
                         id: arbsRestoreButton
-                        text: "Restore ASB defaults"
+                        text: "Restore defaults"
                         onClicked: {
                             StreamingPreferences.restoreArbsDefaults()
                             arbsColumn.syncAll()

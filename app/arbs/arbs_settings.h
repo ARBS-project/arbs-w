@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // ARBS-W settings (B2 D9, CC_TASK_B2 3-4). Same items, allowed values and defaults as ARBS-A ArbsSettings.java:57-69
-// (ASB defaults). Pure C++ (no Qt) so that the normalisation rules are unit-tested; StreamingPreferences stores them.
-// A stored value outside the allowed list is replaced by the ASB default when read (ARBS-A A1-4b lesson).
+// (ASB defaults), except silence = 4 (D-B4c-1, intentional difference, ASB_PARITY row 13; ASB/ARBS-A = 1). Pure C++ (no Qt) so that the normalisation rules are unit-tested; StreamingPreferences stores them.
+// A stored value outside the allowed list is replaced by the default below when read (ARBS-A A1-4b lesson).
 #pragma once
 
 #include <cstddef>
@@ -12,7 +12,7 @@ struct ArbsSettings {
     int amp = 127;              // amplitude cap (0..127). list_arbs_apex_amp
     double gain = 1.0;          // gain G. list_arbs_apex_gain
     int gatePct = 0;            // noise gate %FS, 0 = off. list_arbs_gate
-    int silence = 1;            // silence handling mode 1..4. list_arbs_silence_mode
+    int silence = 4;            // silence handling mode 1..4. list_arbs_silence_mode. D-B4c-1: W default 4 (ASB = 1)
     int curve = 0;              // 0 = ASB curve, 1 = tanh. list_arbs_curve
     int taps = 321;             // FIR taps. list_arbs_filter
     int jitterFixedMs = 0;      // 0 = auto (p95 + 4 ms). list_arbs_jitter_fixed
@@ -32,7 +32,7 @@ struct PrefsSource {
     bool gamepadMouseFromFile = false;
     bool netBlock = false;             // detectnetblocking value in use
     bool netBlockFromFile = false;
-    int silence = 1;                   // arbssilence value in use (after normalisation)
+    int silence = 4;                   // arbssilence value in use (after normalisation). Same as ArbsSettings (D-B4c-1)
     bool silenceFromFile = false;
 };
 
@@ -64,7 +64,7 @@ inline double normalizeDouble(double v, const double (&allowed)[N], double def) 
     return def;
 }
 
-// Returns a copy where every out-of-list value is the ASB default. [changed] (optional) = number of replaced fields.
+// Returns a copy where every out-of-list value is the default (ArbsSettings{}). [changed] (optional) = number of replaced fields.
 inline ArbsSettings normalize(const ArbsSettings& in, int* changed = nullptr) {
     const ArbsSettings d;
     ArbsSettings o = in;
