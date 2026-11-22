@@ -17,10 +17,20 @@ MappingManager::MappingManager()
     QSettings settings;
 
     // Load updated mappings from the Internet once per Moonlight launch
+#ifndef ARBS_W
     if (s_MappingFetcher == nullptr) {
         s_MappingFetcher = new MappingFetcher();
         s_MappingFetcher->start();
     }
+#else
+    // ARBS-W R0 (D-R0-13): no moonlight-stream.org request at startup. Saved mappings below and the built-in
+    // gamecontrollerdb.txt are still used; only new online mapping updates are not fetched.
+    static bool s_ArbsMappingFetchLogged = false;
+    if (!s_ArbsMappingFetchLogged) {
+        s_ArbsMappingFetchLogged = true;
+        qInfo() << "ARBS-W: mapping fetch disabled";
+    }
+#endif
 
     // First load existing saved mappings. This ensures the user's
     // hints can always override the old data.

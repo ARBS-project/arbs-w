@@ -2,7 +2,10 @@
 # ARBS-W (B2 D8): APEX haptics bridge + ARBS Core, Windows only. Included from app.pro (win32).
 # ARBS Core sources live outside this repository at <ARBS-APEX>/core/arbs-core (GPL-3.0-or-later). Distributing a
 # build requires publishing both this fork and the Core sources (GPL-3.0, CLAUDE.md rule 5).
-ARBS_CORE_DIR = $$clean_path($$PWD/../../../../core/arbs-core)
+# R0 (D-R0-8): the ARBS_CORE_DIR environment variable, when set, overrides the default location (standalone clone).
+ARBS_CORE_DIR = $$(ARBS_CORE_DIR)
+isEmpty(ARBS_CORE_DIR): ARBS_CORE_DIR = $$PWD/../../../../core/arbs-core
+ARBS_CORE_DIR = $$clean_path($$ARBS_CORE_DIR)
 !exists($$ARBS_CORE_DIR/include/arbs/engine.h) {
     error("ARBS Core not found at $$ARBS_CORE_DIR")
 }

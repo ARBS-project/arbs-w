@@ -186,7 +186,13 @@ ComputerManager::ComputerManager(StreamingPreferences* prefs)
     settings.endArray();
 
     // Fetch latest compatibility data asynchronously
+#ifndef ARBS_W
     m_CompatFetcher.start();
+#else
+    // ARBS-W R0 (D-R0-13): no moonlight-stream.org request at startup. A previously saved value is still used;
+    // without one, isGfeVersionSupported() treats the host as supported (same as an offline start).
+    qInfo() << "ARBS-W: compatibility fetch disabled";
+#endif
 
     // Start the delayed flush thread to handle saveHosts() calls
     m_DelayedFlushThread = new DelayedFlushThread(this);
