@@ -14,7 +14,7 @@ ARBS consists of four repositories in the `arbs-project` organisation:
 
 | Repository | Role |
 |---|---|
-| `arbs` | Project overview, user guide, download notes, license notices, ARBS Core sources |
+| `arbs` | Project overview, install and download guide (README), license notices, ARBS Core sources |
 | `arbs-h` | Host (fork of Vibepollo 2.18.9) |
 | `arbs-w` | Windows client (this repository, fork of moonlight-qt) |
 | `arbs-a` | Android client (fork of moonlight-android) |

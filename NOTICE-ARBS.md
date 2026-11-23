@@ -8,7 +8,7 @@ The original [LICENSE](LICENSE) file is kept unchanged.
 | Work | Source | License |
 |---|---|---|
 | Moonlight PC (moonlight-qt) | `moonlight-stream/moonlight-qt`, base commit `28629dc17feb53c9195a99a34ab689c6ffb1e6e8` | GPL-3.0 |
-| moonlight-common-c (submodule) | `Nonary/moonlight-common-c` (fork of `moonlight-stream/moonlight-common-c`) | GPL-3.0 |
+| moonlight-common-c (submodule) | `Nonary/moonlight-common-c` public commit `6f05ee89` (fork of `moonlight-stream/moonlight-common-c`) + ARBS patch `patches/moonlight-common-c-6f05ee89-arbs.patch`, applied at build time | GPL-3.0 |
 | Other submodules and libraries | as listed in the upstream sources (`.gitmodules`, `libs/`, `setup-deps.*`) | their own licenses |
 | ARBS Core (built into ARBS-W) | `arbs` repository of the ARBS project | GPL-3.0-or-later |
 
@@ -25,7 +25,8 @@ Either way it is compatible with this GPL-3.0 project.
 ARBS changes are the commits after the base commit above (`git log 28629dc1..HEAD`). Main areas:
 `app/arbs/` (new, APEX bridge and its unit tests), `app/main.cpp`, `app/app.pro`, `app/streaming/`
 (session and input hooks), `app/settings/` (ARBS settings, no mapping download at startup), `app/backend/computermanager.cpp`
-(no compatibility download at startup), `app/gui/` (ARBS settings UI), `scripts/build-arch.bat`, `.gitmodules`.
+(no compatibility download at startup), `app/gui/` (ARBS settings UI), `scripts/build-arch.bat`, `.gitmodules`,
+`patches/` and `scripts/arbs-w-apply-patches.ps1` (moonlight-common-c patch). The Windows executable is named `ARBS-W.exe`.
 Files added for publication: `README.md` (new), `README.upstream.md` (original README), `NOTICE-ARBS.md`, `.gitignore` (ARBS block).
 
 ## Obligations when distributing (GPL-3.0)
