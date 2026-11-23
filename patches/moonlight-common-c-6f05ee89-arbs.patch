@@ -1,0 +1,87 @@
+diff --git a/src/ArbsMcBatch.h b/src/ArbsMcBatch.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..65af747e35d6a517df6b52df56387ba25bbc6ff7
+--- /dev/null
++++ b/src/ArbsMcBatch.h
+@@ -0,0 +1,45 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++// ARBS-W B3b F1 (docs/analysis/B3b.md section 1-3, option F1-a).
++// Provisional decision D-B3b-1 (planning owner has not ruled; analysis recommendation): a queued multi-controller (MC)
++// packet may only absorb a later MC update when the active gamepad mask is the same. Without the mask check a removal
++// MC (mask 0x0) still waiting in the queue was overwritten by the MC that follows the next arrival (mask 0x1), so the
++// host never saw the removal and dropped the arrival as "ControllerNumber already allocated" (B3 field log).
++// Same rule as the host's own batching (Sunshine/Vibepollo input.cpp batch(): "Do not allow batching if the active
++// controllers change"). The mask only changes when a pad is added or removed, so normal input batching is unchanged.
++//
++// Pure C (no common-c state) so ARBS-W unit tests can call the exact rule used by InputStream.c. All values are passed
++// in wire byte order exactly as InputStream.c compares them (LE16 applied by the caller), triggers are 0..255.
++#pragma once
++
++#include <stdint.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++// Upstream rule (unchanged): button changes and triggers leaving/returning to rest or crossing 0xF0 break the batch.
++// Returns 1 when the held packet may absorb the new values.
++static inline int ArbsMcBatchFieldsCompatible(uint16_t heldButtons, uint16_t heldButtons2, uint8_t heldLeftTrigger,
++                                              uint8_t heldRightTrigger, uint16_t newButtons, uint16_t newButtons2,
++                                              uint8_t newLeftTrigger, uint8_t newRightTrigger) {
++    if (heldButtons != newButtons || heldButtons2 != newButtons2) return 0;
++    if ((heldLeftTrigger == 0) != (newLeftTrigger == 0)) return 0;
++    if ((heldRightTrigger == 0) != (newRightTrigger == 0)) return 0;
++    if ((heldLeftTrigger >= 0xF0) != (newLeftTrigger >= 0xF0)) return 0;
++    if ((heldRightTrigger >= 0xF0) != (newRightTrigger >= 0xF0)) return 0;
++    return 1;
++}
++
++// ARBS-W rule [provisional D-B3b-1] = upstream rule + same active gamepad mask.
++static inline int ArbsMcBatchCompatible(uint16_t heldButtons, uint16_t heldButtons2, uint8_t heldLeftTrigger,
++                                        uint8_t heldRightTrigger, uint16_t heldMask, uint16_t newButtons,
++                                        uint16_t newButtons2, uint8_t newLeftTrigger, uint8_t newRightTrigger,
++                                        uint16_t newMask) {
++    if (heldMask != newMask) return 0;
++    return ArbsMcBatchFieldsCompatible(heldButtons, heldButtons2, heldLeftTrigger, heldRightTrigger, newButtons,
++                                       newButtons2, newLeftTrigger, newRightTrigger);
++}
++
++#ifdef __cplusplus
++}
++#endif
+diff --git a/src/InputStream.c b/src/InputStream.c
+index e8ee587f51f29b65a37e12bba89c6133473610cc..c61a3244467f1526df321e7d26e3f2ad8c707d89 100644
+--- a/src/InputStream.c
++++ b/src/InputStream.c
+@@ -1,5 +1,6 @@
+ #include "Limelight-internal.h"
+ #include "ControllerSpeakerPcm.h"
++#include "ArbsMcBatch.h"
+ 
+ static SOCKET inputSock = INVALID_SOCKET;
+ static unsigned char currentAesIv[16];
+@@ -1152,12 +1153,18 @@ static int sendControllerEventInternal(uint8_t controllerNumber, uint16_t active
+         // a press and release queued before the sender runs collapse into a release.
+         // The virtual Steam Controller also synthesizes a full-pull click at 0xF0.
+         // Preserve that edge too; travel within each range can still be coalesced.
+-        if (holder->packet.multiController.buttonFlags != LE16((short)buttonFlags) ||
+-            holder->packet.multiController.buttonFlags2 != (IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0) ||
+-            (holder->packet.multiController.leftTrigger == 0) != (leftTrigger == 0) ||
+-            (holder->packet.multiController.rightTrigger == 0) != (rightTrigger == 0) ||
+-            (holder->packet.multiController.leftTrigger >= 0xF0) != (leftTrigger >= 0xF0) ||
+-            (holder->packet.multiController.rightTrigger >= 0xF0) != (rightTrigger >= 0xF0)) {
++        // ARBS-W B3b F1 [provisional D-B3b-1]: a change of the active gamepad mask (pad added/removed) also breaks
++        // the batch, so a queued removal MC (mask without the bit) is never overwritten by the MC that follows the
++        // next arrival. Same rule as the host batch(). Rule in ArbsMcBatch.h (unit-tested by ARBS-W).
++        if (!ArbsMcBatchCompatible((uint16_t)holder->packet.multiController.buttonFlags,
++                                   (uint16_t)holder->packet.multiController.buttonFlags2,
++                                   holder->packet.multiController.leftTrigger,
++                                   holder->packet.multiController.rightTrigger,
++                                   (uint16_t)holder->packet.multiController.activeGamepadMask,
++                                   (uint16_t)LE16((short)buttonFlags),
++                                   (uint16_t)(IS_SUNSHINE() ? LE16((short)(buttonFlags >> 16)) : 0),
++                                   leftTrigger, rightTrigger,
++                                   (uint16_t)LE16(activeGamepadMask))) {
+             // Pretend there wasn't a currently queued controller packet
+             holder = NULL;
+         }

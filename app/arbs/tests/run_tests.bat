@@ -44,6 +44,10 @@ del /q "%BUILD%\obj\*.obj" 2>nul
 
 set FLAGS=/nologo /std:c++17 /W4 /permissive- /EHsc /utf-8 /O2 /fp:precise /MD /Zc:__cplusplus /DUNICODE /D_UNICODE /I"%CORE%\include" /I"%CORE%\tests" /I"%ARBSDIR%"
 
+rem R1b (D-R1b-1): the tests include a header that comes from patches\
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ARBSDIR%\..\..\scripts\arbs-w-apply-patches.ps1"
+if errorlevel 1 exit /b 4
+
 echo [arbs-w-tests] compile
 cl %FLAGS% /c "%CORE%\src\*.cpp" "%ARBSDIR%\arbs_logic.cpp" "%ARBSDIR%\arbs_identity.cpp" "%ARBSDIR%\arbs_update.cpp" "%ARBSDIR%\arbs_log.cpp" "%ARBSDIR%\win_clock.cpp" "%ARBSDIR%\win_hid_port.cpp" "%HERE%\test_arbs_w.cpp" /Fo"%BUILD%\obj\\"
 if errorlevel 1 exit /b 2

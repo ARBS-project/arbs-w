@@ -168,6 +168,11 @@ set CFLAGS=/GL
 set CXXFLAGS=/GL
 set LDFLAGS=/LTCG
 
+rem ARBS-W R1b (D-R1b-1): the submodule stays at its public commit; ARBS changes come from patches\
+echo Applying ARBS patches
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SOURCE_ROOT%\scripts\arbs-w-apply-patches.ps1"
+if !ERRORLEVEL! NEQ 0 goto Error
+
 echo Configuring the project
 pushd %BUILD_FOLDER%
 %QMAKE_CMD% %SOURCE_ROOT%\moonlight-qt.pro
@@ -268,7 +273,7 @@ if not x%QT_PATH:\5.=%==x%QT_PATH% (
 )
 
 echo Deploying Qt dependencies
-%WINDEPLOYQT_CMD% --dir %DEPLOY_FOLDER% --%BUILD_CONFIG% --qmldir %SOURCE_ROOT%\app\gui --no-opengl-sw --no-compiler-runtime --no-sql %WINDEPLOYQT_ARGS% %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe
+%WINDEPLOYQT_CMD% --dir %DEPLOY_FOLDER% --%BUILD_CONFIG% --qmldir %SOURCE_ROOT%\app\gui --no-opengl-sw --no-compiler-runtime --no-sql %WINDEPLOYQT_ARGS% %BUILD_FOLDER%\app\%BUILD_CONFIG%\ARBS-W.exe
 if !ERRORLEVEL! NEQ 0 goto Error
 
 echo Deleting unused files
@@ -288,7 +293,7 @@ del %DEPLOY_FOLDER%\icuuc.dll
 
 if "%SIGN%"=="1" (
     echo Signing deployed binaries
-    set FILES_TO_SIGN=%BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe
+    set FILES_TO_SIGN=%BUILD_FOLDER%\app\%BUILD_CONFIG%\ARBS-W.exe
     for /r "%DEPLOY_FOLDER%" %%f in (*.dll *.exe) do (
         set FILES_TO_SIGN=!FILES_TO_SIGN! %%f
     )
@@ -300,7 +305,7 @@ if "%ML_SYMBOL_STORE%" NEQ "" (
     echo Publishing binaries to symbol store: %ML_SYMBOL_STORE%
     symstore add /r /f %DEPLOY_FOLDER%\*.* /s %ML_SYMBOL_STORE% /t Moonlight
     if !ERRORLEVEL! NEQ 0 goto Error
-    symstore add /r /f %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe /s %ML_SYMBOL_STORE% /t Moonlight
+    symstore add /r /f %BUILD_FOLDER%\app\%BUILD_CONFIG%\ARBS-W.exe /s %ML_SYMBOL_STORE% /t Moonlight
     if !ERRORLEVEL! NEQ 0 goto Error
 )
 
@@ -315,7 +320,7 @@ if !ERRORLEVEL! NEQ 0 goto Error
 :ArbsAfterMsi
 
 echo Copying application binary to deployment directory
-copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\Moonlight.exe %DEPLOY_FOLDER%
+copy %BUILD_FOLDER%\app\%BUILD_CONFIG%\ARBS-W.exe %DEPLOY_FOLDER%
 if !ERRORLEVEL! NEQ 0 goto Error
 
 echo Building portable package

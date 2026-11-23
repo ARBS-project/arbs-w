@@ -3,6 +3,9 @@ CONFIG += c++17
 
 unix:!macx {
     TARGET = moonlight
+} else:win32 {
+    # ARBS-W R1b (R-02): Windows executable name
+    TARGET = ARBS-W
 } else {
     # On macOS, this is the name displayed in the global menu bar
     TARGET = Moonlight
