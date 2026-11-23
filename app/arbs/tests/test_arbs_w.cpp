@@ -11,12 +11,15 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <functional>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -27,10 +30,12 @@
 #include "arbs/java_compat.h"
 #include "arbs/protocol.h"
 #include "fakes.h"
+#include "arbs_identity.h"
 #include "arbs_log.h"
 #include "arbs_logic.h"
 #include "arbs_policy.h"
 #include "arbs_settings.h"
+#include "arbs_update.h"
 #include "mini_test.h"
 #include "win_clock.h"
 #include "win_hid_port.h"
@@ -2557,6 +2562,156 @@ TEST(b5_w, mark_seen_dropped_exact_arrival) {
     CHECK(!h.pending());
     CHECK(!hideOther(true, false, h.anyBound(), h.pending()));
     mt::report().push_back("b5 D-B5-4: dropped 37d7/2502 arrival -> markSeen -> exactPending false -> other pads shown; 045e/028e and id -1 ignored");
+}
+
+// ---- R1b (D-R1b-3/5): settings identity and one-time copy ----
+namespace {
+namespace fs = std::filesystem;
+
+fs::path r1bDir(const char* name) {
+    const fs::path d = fs::path(scratchDir()) / "r1b-identity" / name;
+    std::error_code ec;
+    fs::remove_all(d, ec);
+    fs::create_directories(d);
+    return d;
+}
+fs::path oldIniOf(const fs::path& d) { return d / L"Moonlight Game Streaming Project" / L"Moonlight.ini"; }
+fs::path newIniOf(const fs::path& d) { return d / L"ARBS" / L"ARBS-W.ini"; }
+void putFile(const fs::path& p, const std::string& body) {
+    fs::create_directories(p.parent_path());
+    std::ofstream o(p, std::ios::binary);
+    o.write(body.data(), static_cast<std::streamsize>(body.size()));
+}
+std::string getFile(const fs::path& p) {
+    std::ifstream i(p, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(i), std::istreambuf_iterator<char>());
+}
+const char* const kIniBody = "[General]\r\nuniqueid=ABC\r\ncertificate=@ByteArray(x\\0y)\r\n\xED\x95\x9C=1\r\n";
+}  // namespace
+
+TEST(r1b_identity, names_differ_from_official) {
+    CHECK(std::string(arbsw::kSettingsOrgName) == "ARBS");
+    CHECK(std::string(arbsw::kSettingsAppName) == "ARBS-W");
+    CHECK(std::string(arbsw::kSettingsOrgName) != arbsw::kLegacySettingsOrgName);
+    CHECK(std::string(arbsw::kSettingsAppName) != arbsw::kLegacySettingsAppName);
+}
+
+TEST(r1b_identity, old_only_is_copied_byte_identical) {
+    const fs::path d = r1bDir("copy");
+    putFile(oldIniOf(d), kIniBody);
+    const auto r = arbsw::prepareSettingsIdentity(d, false);
+    CHECK(r.action == arbsw::SettingsIdentityAction::Migrated);
+    CHECK(!r.useLegacyIdentity());
+    CHECK(getFile(newIniOf(d)) == kIniBody);
+    CHECK(getFile(oldIniOf(d)) == kIniBody);
+    CHECK(!fs::exists(d / L"ARBS" / L"ARBS-W.ini.migrating"));
+    CHECK(r.note.find(d.string()) == std::string::npos);
+}
+
+TEST(r1b_identity, existing_new_is_never_overwritten) {
+    const fs::path d = r1bDir("both");
+    putFile(oldIniOf(d), "old");
+    putFile(newIniOf(d), "new");
+    const auto r = arbsw::prepareSettingsIdentity(d, false);
+    CHECK(r.action == arbsw::SettingsIdentityAction::UseNew);
+    CHECK(r.note.empty());
+    CHECK(getFile(newIniOf(d)) == "new");
+    CHECK(getFile(oldIniOf(d)) == "old");
+}
+
+TEST(r1b_identity, neither_creates_nothing) {
+    const fs::path d = r1bDir("none");
+    const auto r = arbsw::prepareSettingsIdentity(d, false);
+    CHECK(r.action == arbsw::SettingsIdentityAction::UseNew);
+    CHECK(fs::is_empty(d));
+}
+
+TEST(r1b_identity, copy_failure_keeps_old_identity_and_retries) {
+    const fs::path d = r1bDir("fail");
+    putFile(oldIniOf(d), kIniBody);
+    putFile(d / L"ARBS", "a file where the folder must go");
+    const auto r = arbsw::prepareSettingsIdentity(d, false);
+    CHECK(r.action == arbsw::SettingsIdentityAction::LegacyAfterError);
+    CHECK(r.useLegacyIdentity());
+    CHECK(!r.note.empty());
+    CHECK(r.note.find(d.string()) == std::string::npos);
+    CHECK(getFile(oldIniOf(d)) == kIniBody);
+    fs::remove(d / L"ARBS");
+    const auto again = arbsw::prepareSettingsIdentity(d, false);
+    CHECK(again.action == arbsw::SettingsIdentityAction::Migrated);
+    CHECK(getFile(newIniOf(d)) == kIniBody);
+}
+
+TEST(r1b_identity, read_only_mode_changes_nothing) {
+    const fs::path d = r1bDir("dump");
+    putFile(oldIniOf(d), kIniBody);
+    const auto r = arbsw::prepareSettingsIdentity(d, true);
+    CHECK(r.action == arbsw::SettingsIdentityAction::LegacyReadOnly);
+    CHECK(r.useLegacyIdentity());
+    CHECK(!fs::exists(d / L"ARBS"));
+    const fs::path e = r1bDir("dump-none");
+    CHECK(arbsw::prepareSettingsIdentity(e, true).action == arbsw::SettingsIdentityAction::UseNew);
+    CHECK(fs::is_empty(e));
+}
+
+TEST(r1b_identity, stale_temp_file_is_replaced) {
+    const fs::path d = r1bDir("stale");
+    putFile(oldIniOf(d), kIniBody);
+    putFile(d / L"ARBS" / L"ARBS-W.ini.migrating", "partial");
+    CHECK(arbsw::prepareSettingsIdentity(d, false).action == arbsw::SettingsIdentityAction::Migrated);
+    CHECK(getFile(newIniOf(d)) == kIniBody);
+    CHECK(!fs::exists(d / L"ARBS" / L"ARBS-W.ini.migrating"));
+}
+
+// ---- R1b (D-R1b-6): update notice rules ----
+TEST(r1b_update, tag_parsing) {
+    std::array<int, 3> v{};
+    CHECK(arbsw::parseReleaseVersion("v0.1.2", v));
+    CHECK(v[0] == 0 && v[1] == 1 && v[2] == 2);
+    CHECK(arbsw::parseReleaseVersion("10.20.30", v));
+    CHECK(v[0] == 10 && v[1] == 20 && v[2] == 30);
+    for (const char* bad : {"", "v", "0.1", "0.1.2.3", "v0.1.2-rc1", "V0.1.2", "0..2", "a.b.c", " 0.1.2", "0.1.2 ", "1234567.0.0"}) {
+        CHECK_MSG(!arbsw::parseReleaseVersion(bad, v), bad);
+    }
+    CHECK(arbsw::releaseVersionText("v0.1.2") == "0.1.2");
+    CHECK(arbsw::releaseVersionText("0.1.2") == "0.1.2");
+    CHECK(arbsw::releaseVersionText("nightly").empty());
+}
+
+TEST(r1b_update, version_compare_uses_arbs_version) {
+    CHECK(arbsw::isNewerRelease("0.1.0", "v0.1.1"));
+    CHECK(arbsw::isNewerRelease("0.1.9", "v0.2.0"));
+    CHECK(arbsw::isNewerRelease("0.9.9", "1.0.0"));
+    CHECK(arbsw::isNewerRelease("0.1.9", "0.1.10"));
+    CHECK(!arbsw::isNewerRelease("0.1.0", "v0.1.0"));
+    CHECK(!arbsw::isNewerRelease("0.1.0", "v0.0.9"));
+    CHECK(!arbsw::isNewerRelease("0.1.0", "garbage"));
+    CHECK(!arbsw::isNewerRelease("garbage", "v9.9.9"));
+}
+
+TEST(r1b_update, release_link_rules) {
+    CHECK(arbsw::isTrustedReleaseUrl("https://github.com/arbs-project/arbs-w/releases/tag/v0.1.1"));
+    CHECK(arbsw::isTrustedReleaseUrl("https://github.com/ARBS-project/arbs-w/releases/tag/v0.1.1"));
+    for (const char* bad : {
+             "http://github.com/arbs-project/arbs-w/releases/tag/v0.1.1",
+             "https://github.com.evil.example/arbs-project/arbs-w/releases/tag/v0.1.1",
+             "https://github.com@evil.example/arbs-project/arbs-w/releases/tag/v0.1.1",
+             "https://github.com/moonlight-stream/moonlight-qt/releases/tag/v6.2.0",
+             "https://github.com/arbs-project/arbs-h/releases/tag/v0.1.1",
+             "https://github.com/arbs-project/ARBS-W/releases/tag/v0.1.1",
+             "https://github.com/arbs-project/arbs-w/releases/../../evil",
+             "https://github.com/arbs-project/arbs-w/releases/tag/v1?x=1",
+             "https://github.com/arbs-project/arbs-w/releases/tag/v1#x",
+             "https://github.com/arbs-project/arbs-w/releases/tag/a b",
+             "https://github.com/arbs-project/arbs-w/releases",
+             ""}) {
+        CHECK_MSG(!arbsw::isTrustedReleaseUrl(bad), bad);
+    }
+}
+
+TEST(r1b_update, user_agent_and_endpoint) {
+    CHECK(arbsw::updateUserAgent("0.1.0") == "ARBS-W/0.1.0");
+    CHECK(std::string(arbsw::kLatestReleaseApiUrl) == "https://api.github.com/repos/arbs-project/arbs-w/releases/latest");
 }
 
 int main(int argc, char** argv) {

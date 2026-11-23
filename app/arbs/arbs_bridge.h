@@ -33,6 +33,9 @@ public:
     // Before the portable.dat check: if the exe folder has portable.dat and the working folder differs, switch the
     // working folder to the exe folder (prevents HKCU/%LOCALAPPDATA% writes when started from a shortcut).
     static void fixPortableWorkingDir();
+    // R1b (D-R1b-5): portable mode only, before the first QSettings. Copies the old INI to the new location once. When
+    // that fails (or readOnly with only the old INI) this process keeps the old organization/application names.
+    static void prepareSettingsIdentity(bool readOnly);
     // B4b F2 (D-B4b-1): hidden "--arbs-dump-prefs". Called right after the portable QSettings path is set, before the
     // ARBS log, the engine, SDL init and QGuiApplication. No portable.dat next to the exe -> returns 3 without reading
     // anything (no registry access). Otherwise reads StreamingPreferences::get() (never save()) and writes

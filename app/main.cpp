@@ -448,9 +448,10 @@ int main(int argc, char *argv[])
     // Set these here to allow us to use the default QSettings constructor.
     // These also ensure that our cache directory is named correctly. As such,
     // it is critical that these be called before Path::initialize().
-    QCoreApplication::setOrganizationName("Moonlight Game Streaming Project");
-    QCoreApplication::setOrganizationDomain("moonlight-stream.com");
-    QCoreApplication::setApplicationName("Moonlight");
+    // ARBS-W R1b (D-R1b-3): settings stay apart from an official Moonlight on the same PC.
+    QCoreApplication::setOrganizationName("ARBS");
+    QCoreApplication::setOrganizationDomain("arbs-project.github.io");
+    QCoreApplication::setApplicationName("ARBS-W");
 
 #ifdef ARBS_W
     // ARBS-W: portable.dat next to the exe -> work in the exe folder even when started from a shortcut, so that
@@ -465,6 +466,17 @@ int main(int argc, char *argv[])
 
         // Initialize paths for portable mode
         Path::initialize(true);
+
+#ifdef ARBS_W
+        // ARBS-W R1b (D-R1b-5): before the first QSettings. The dump mode promises not to save, so it only reads.
+        bool arbsReadOnlyStart = false;
+        for (int i = 1; i < argc; i++) {
+            if (argv[i] != nullptr && strcmp(argv[i], "--arbs-dump-prefs") == 0) {
+                arbsReadOnlyStart = true;
+            }
+        }
+        ArbsBridge::prepareSettingsIdentity(arbsReadOnlyStart);
+#endif
     }
     else {
         // Initialize paths for standard installation
@@ -765,8 +777,8 @@ int main(int argc, char *argv[])
     // Set our app name for SDL to use with PulseAudio and PipeWire. This matches what we
     // provide as our app name to libsoundio too. On SDL 2.0.18+, SDL_APP_NAME is also used
     // for screensaver inhibitor reporting.
-    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "Moonlight");
-    SDL_SetHint(SDL_HINT_APP_NAME, "Moonlight");
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, "ARBS-W");
+    SDL_SetHint(SDL_HINT_APP_NAME, "ARBS-W");
 
     // SDL will try to lock the mouse cursor on Wayland if it's not visible in order to
     // support applications that assume they can warp the cursor (which isn't possible

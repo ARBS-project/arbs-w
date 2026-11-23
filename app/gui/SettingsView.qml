@@ -1713,7 +1713,7 @@ Flickable {
                 CheckBox {
                     id: checkForUpdatesCheck
                     width: parent.width
-                    text: "Check for Moonlight updates at startup (off by default)"
+                    text: "Check for ARBS-W updates at startup (off by default)"
                     font.pointSize: 12
                     checked: StreamingPreferences.checkForUpdates
                     onCheckedChanged: {
@@ -1992,6 +1992,33 @@ Flickable {
                     ToolTip.text: qsTr("Display real-time stream performance information while streaming.") + "\n\n" +
                                   qsTr("You can toggle it at any time while streaming using Ctrl+Alt+Shift+S or Select+L1+R1+X.") + "\n\n" +
                                   qsTr("The performance overlay is not supported on Steam Link or Raspberry Pi.")
+                }
+            }
+        }
+
+        GroupBox {
+            id: arbsAboutGroupBox
+            width: (parent.width - (parent.leftPadding + parent.rightPadding))
+            padding: 12
+            title: "<font color=\"skyblue\">About ARBS-W</font>"
+            font.pointSize: 12
+
+            Column {
+                anchors.fill: parent
+                spacing: 5
+
+                Label {
+                    width: parent.width
+                    text: "ARBS-W %1 · based on Moonlight-qt %2 · GPL-3.0".arg(SystemProperties.arbsVersionString).arg(SystemProperties.versionString)
+                    font.pointSize: 12
+                    wrapMode: Text.Wrap
+                }
+
+                Button {
+                    id: arbsProjectPageButton
+                    visible: SystemProperties.hasBrowser
+                    text: "Open project page"
+                    onClicked: Qt.openUrlExternally("https://github.com/arbs-project/arbs-w")
                 }
             }
         }

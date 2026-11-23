@@ -10,6 +10,7 @@
 
 #include "arbs_bridge.h"
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -27,6 +28,7 @@
 #include "SDL_compat.h"
 #include "arbs/engine.h"
 #include "arbs/java_compat.h"
+#include "arbs_identity.h"
 #include "arbs_log.h"
 #include "arbs_logic.h"
 #include "arbs_policy.h"
@@ -407,6 +409,16 @@ void ArbsBridge::fixPortableWorkingDir() {
     } else {
         g_earlyNotes += "ARBS-W 경고: 작업 폴더를 exe 폴더로 바꾸지 못함(오류 " + std::to_string(GetLastError()) + ")\n";
     }
+}
+
+void ArbsBridge::prepareSettingsIdentity(bool readOnly) {
+    const arbsw::SettingsIdentityResult r =
+        arbsw::prepareSettingsIdentity(std::filesystem::path(QDir::currentPath().toStdWString()), readOnly);
+    if (r.useLegacyIdentity()) {
+        QCoreApplication::setOrganizationName(arbsw::kLegacySettingsOrgName);
+        QCoreApplication::setApplicationName(arbsw::kLegacySettingsAppName);
+    }
+    if (!r.note.empty()) g_earlyNotes += r.note + "\n";
 }
 
 int ArbsBridge::dumpPrefs() {

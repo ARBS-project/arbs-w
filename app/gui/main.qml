@@ -296,7 +296,7 @@ ApplicationWindow {
             Label {
                 id: versionLabel
                 visible: stackView.currentItem instanceof SettingsView
-                text: qsTr("Version %1").arg(SystemProperties.versionString)
+                text: "ARBS-W %1 (Moonlight %2)".arg(SystemProperties.arbsVersionString).arg(SystemProperties.versionString)
                 font.pointSize: 12
                 horizontalAlignment: Qt.AlignRight
                 verticalAlignment: Qt.AlignVCenter
@@ -371,7 +371,7 @@ ApplicationWindow {
 
                 function updateAvailable(version, url)
                 {
-                    ToolTip.text = qsTr("Update available for Moonlight: Version %1").arg(version)
+                    ToolTip.text = "Update available for ARBS-W: Version %1".arg(version)
                     updateButton.browserUrl = url
                     updateButton.visible = true
                 }
@@ -407,7 +407,7 @@ ApplicationWindow {
                 }
 
                 // TODO need to make sure browser is brought to foreground.
-                onClicked: Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-docs/wiki/Setup-Guide");
+                onClicked: Qt.openUrlExternally("https://github.com/arbs-project/arbs#readme");
 
                 Keys.onDownPressed: {
                     stackView.currentItem.forceActiveFocus(Qt.TabFocus)
@@ -478,7 +478,7 @@ ApplicationWindow {
         standardButtons: Dialog.Ok | Dialog.Cancel
         text: qsTr("This version of Moonlight isn't optimized for your PC. Please download the '%1' version of Moonlight for the best streaming performance.").arg(SystemProperties.friendlyNativeArchName)
         onAccepted: {
-            Qt.openUrlExternally("https://github.com/moonlight-stream/moonlight-qt/releases");
+            Qt.openUrlExternally("https://github.com/arbs-project/arbs-w/releases");
         }
     }
 

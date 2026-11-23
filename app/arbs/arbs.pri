@@ -33,6 +33,7 @@ SOURCES += \
     $$ARBS_CORE_DIR/src/trigger_bridge.cpp \
     $$ARBS_CORE_DIR/src/trigger_effect.cpp \
     $$PWD/arbs_bridge.cpp \
+    $$PWD/arbs_identity.cpp \
     $$PWD/arbs_log.cpp \
     $$PWD/arbs_logic.cpp \
     $$PWD/win_clock.cpp \
@@ -40,6 +41,7 @@ SOURCES += \
 
 HEADERS += \
     $$PWD/arbs_bridge.h \
+    $$PWD/arbs_identity.h \
     $$PWD/arbs_log.h \
     $$PWD/arbs_logic.h \
     $$PWD/arbs_numbering.h \

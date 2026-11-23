@@ -47,6 +47,7 @@ private:
 SystemProperties::SystemProperties()
 {
     versionString = QString(VERSION_STR);
+    arbsVersionString = QString(ARBS_W_VERSION_STR);
     hasDesktopEnvironment = WMUtils::isRunningDesktopEnvironment();
     isRunningWayland = WMUtils::isRunningWayland();
     isRunningXWayland = isRunningWayland && QGuiApplication::platformName() == "xcb";

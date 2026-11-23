@@ -548,9 +548,9 @@ unix:!macx: {
 }
 win32 {
     RC_ICONS = moonlight.ico
-    QMAKE_TARGET_COMPANY = Moonlight Game Streaming Project
-    QMAKE_TARGET_DESCRIPTION = Moonlight Game Streaming Client
-    QMAKE_TARGET_PRODUCT = Moonlight
+    QMAKE_TARGET_COMPANY = ARBS project
+    QMAKE_TARGET_DESCRIPTION = ARBS-W (based on Moonlight-qt)
+    QMAKE_TARGET_PRODUCT = ARBS-W
 
     CONFIG -= embed_manifest_exe
     QMAKE_LFLAGS += /MANIFEST:embed /MANIFESTINPUT:$${PWD}/Moonlight.exe.manifest
@@ -582,3 +582,7 @@ macx {
 
 VERSION = "$$cat(version.txt)"
 DEFINES += VERSION_STR=\\\"$$cat(version.txt)\\\"
+# ARBS-W R1b (D-R1b-10): product version. version.txt stays the Moonlight base version.
+DEFINES += ARBS_W_VERSION_STR=\\\"$$cat($$PWD/arbs/arbs_w_version.txt)\\\"
+SOURCES += arbs/arbs_update.cpp
+HEADERS += arbs/arbs_update.h
