@@ -1,0 +1,191 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# ARBS-W Windows build (CI1): builds the ARBS-W portable zip (x64) the same way as the local build PC
+# (arbs repository build/windows-client wrapper, Qt + MSVC, moonlight-qt-deps) and keeps it only as a
+# workflow artifact. No release, no tag, no MSI, no signing (the SignPath step at the end is disabled until CI2).
+name: build-windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ARBS-project/arbs commit that provides ARBS Core, the build wrapper, zip extras and the user tools
+  # (update by hand; Dependabot does not).
+  ARBS_BUILD_SHA: bc03dc85eff0613a88a4ac1b3c094cd6186eae60
+  # moonlight-qt-deps v20.1, x64 only, checked before use (the repository's setup-deps.ps1 does not check a hash).
+  DEPS_ZIP_URL: https://github.com/moonlight-stream/moonlight-qt-deps/releases/download/v20.1/Windows-x64.zip
+  DEPS_ZIP_SHA256: 5fc9f15fc61d8346ec44981127a39f3fe546afec1d7bc7858218eba2e3b0c646
+  QT_VERSION: 6.12.1
+
+jobs:
+  build:
+    name: ARBS-W portable zip
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Runner image
+        run: |
+          New-Item -ItemType Directory -Force -Path ci-evidence | Out-Null
+          "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion" | Tee-Object -FilePath ci-evidence/runner.txt
+
+      - name: Checkout arbs-w
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: client-w/arbs-w
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout arbs (ARBS Core, build wrapper, user tools)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ARBS-project/arbs
+          ref: ${{ env.ARBS_BUILD_SHA }}
+          path: _arbs
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Place build scripts like the local build PC
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # arbs-w-zip-extras.ps1 finds arbs-w and test-kit next to its own parent folder (client-w).
+          New-Item -ItemType Directory -Force -Path client-w/scripts | Out-Null
+          Copy-Item -LiteralPath _arbs/build/windows-client/arbs-w-build.bat, _arbs/build/windows-client/arbs-w-zip-extras.ps1 -Destination client-w/scripts/ -Force
+          Copy-Item -LiteralPath _arbs/build/windows-client/test-kit -Destination client-w/test-kit -Recurse -Force
+          Get-ChildItem client-w/scripts, client-w/test-kit -Recurse -File | Select-Object FullName, Length | Format-Table -AutoSize
+
+      - name: moonlight-qt-deps (x64, SHA-256 checked)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'moonlight-qt-deps-Windows-x64.zip'
+          Invoke-WebRequest -Uri $env:DEPS_ZIP_URL -OutFile $zip
+          $h = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($h -ne $env:DEPS_ZIP_SHA256) { throw "moonlight-qt-deps zip SHA-256 mismatch: $h" }
+          $dst = 'client-w/arbs-w/libs/windows'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Expand-Archive -LiteralPath $zip -DestinationPath $dst -Force
+          if (-not (Test-Path -LiteralPath "$dst/lib/x64/SDL3.dll")) { throw 'libs/windows/lib/x64/SDL3.dll missing after extraction' }
+          "moonlight-qt-deps v20.1 Windows-x64.zip sha256=$h" | Tee-Object -FilePath ci-evidence/deps.txt
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06  # v4.5.0
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2022_64
+          cache: true
+          set-env: false
+          add-tools-to-path: false
+          aqtsource: 'git+https://github.com/miurahr/aqtinstall.git@073e34d7c2ab4ae6961ed7cca690b3abd5ba5a7e'
+
+      - name: VC runtime folder and tool versions
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vsVer = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationVersion
+          $redist = Get-ChildItem -LiteralPath (Join-Path $vs 'VC\Redist\MSVC') -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            ForEach-Object { Get-ChildItem -LiteralPath (Join-Path $_.FullName 'x64') -Directory -Filter 'Microsoft.VC14*.CRT' -ErrorAction SilentlyContinue } |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'vcruntime140.dll') } |
+            Select-Object -First 1
+          if (-not $redist) { throw 'VC runtime redist folder not found' }
+          "ARBS_VC_REDIST_DLL_PATH=$($redist.FullName)" >> $env:GITHUB_ENV
+          $qtBin = Join-Path $env:RUNNER_WORKSPACE "Qt\$env:QT_VERSION\msvc2022_64\bin"
+          if (-not (Test-Path -LiteralPath (Join-Path $qtBin 'qmake.exe'))) { throw "qmake.exe not found in $qtBin" }
+          @(
+            "vs=$vsVer"
+            "vc_redist=$($redist.Parent.Parent.Name)/$($redist.Name) (local build used 14.44.35112/Microsoft.VC143.CRT)"
+            "qt=$env:QT_VERSION"
+            "7zip=$((Get-Item 'C:\Program Files\7-Zip\7z.exe').VersionInfo.ProductVersion)"
+          ) | Tee-Object -FilePath ci-evidence/tools.txt
+
+      - name: Build (arbs-w-build.bat)
+        shell: cmd
+        env:
+          ARBS_ROOT: ${{ github.workspace }}
+          ARBS_TC: ${{ runner.temp }}\arbs-tools
+          ARBS_QT_BIN: ${{ runner.workspace }}\Qt\${{ env.QT_VERSION }}\msvc2022_64\bin
+          ARBS_CORE_DIR: ${{ github.workspace }}\_arbs\core
+        run: |
+          set /p ARBS_W_VER=<client-w\arbs-w\app\arbs\arbs_w_version.txt
+          call client-w\scripts\arbs-w-build.bat arbs-w-%ARBS_W_VER%-windows-portable.zip
+          if errorlevel 1 exit /b 1
+
+      - name: Report (zip list, version info, signature state; nothing is executed)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = @(Get-ChildItem -Path client-w/out -File -Filter 'arbs-w-*-windows-portable.zip')
+          if ($zip.Count -ne 1) { throw "expected one portable zip, found $($zip.Count)" }
+          & 'C:\Program Files\7-Zip\7z.exe' l $zip[0].FullName | Out-File -FilePath ci-evidence/zip-list.txt -Encoding utf8
+          $x = Join-Path $env:RUNNER_TEMP 'arbs-w-unzip'
+          Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $x -Force
+          $rows = foreach ($name in 'ARBS-W.exe', 'AntiHooking.dll', 'Qt6Core.dll', 'vcruntime140.dll', 'package-files.sha256') {
+            foreach ($f in @(Get-ChildItem -LiteralPath $x -Recurse -File -Filter $name)) {
+              $v = $f.VersionInfo
+              $sig = if ($f.Extension -in '.exe', '.dll') { (Get-AuthenticodeSignature -LiteralPath $f.FullName).Status } else { '' }
+              [pscustomobject]@{
+                File           = $f.FullName.Substring($x.Length + 1).Replace('\', '/')
+                Length         = $f.Length
+                ProductName    = $v.ProductName
+                ProductVersion = $v.ProductVersion
+                FileVersion    = $v.FileVersion
+                Signature      = $sig
+              }
+            }
+          }
+          $rows | Export-Csv -Path ci-evidence/pe-report.csv -NoTypeInformation -Encoding utf8
+          $rows | Format-Table -AutoSize
+          "$($zip[0].Name) $($zip[0].Length) bytes" | Tee-Object -FilePath ci-evidence/zip.txt
+
+      - name: Upload portable zip
+        id: upload-zip
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: arbs-w-portable
+          path: |
+            client-w/out/*.zip
+            client-w/out/*.sha256
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload CI evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: arbs-w-ci-evidence
+          path: ci-evidence/
+          retention-days: 7
+          if-no-files-found: warn
+
+      # ---------------------------------------------------------------------------------------------
+      # SignPath signing: DISABLED (if: false). Activated only by a later task (CI2) after the user has
+      # been accepted by SignPath Foundation and has entered the token in the repository Secrets himself.
+      # Before activation: arbs-w-zip-extras.ps1 writes package-files.sha256 (hashes of the zip content)
+      # and checks it, so signing inside the final zip would break that list. The build-arch.bat output
+      # (MoonlightPortable zip) must be signed first and the extras run afterwards (wrapper split, CI2).
+      # Configuration: .signpath/artifact-configurations/arbs-w-portable.xml.
+      # ---------------------------------------------------------------------------------------------
+      - name: SignPath - sign ARBS-W.exe / AntiHooking.dll (disabled, CI2)
+        if: false
+        uses: signpath/github-action-submit-signing-request@a2c5b60d9c75f073142b653c354b632eedce097b  # v3.2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: arbs-w
+          signing-policy-slug: release-signing
+          artifact-configuration-slug: arbs-w-portable
+          github-artifact-id: ${{ steps.upload-zip.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: client-w/out/signed

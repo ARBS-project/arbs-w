@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DRAFT / REVIEW COPY of a SignPath artifact configuration (CI1). Not active: the signing step in
+  .github/workflows/build-windows.yml is disabled (if: false). The SignPath portal is the source of
+  truth once a project exists; editing this file does NOT change signing.
+
+  Slug (assumed, rename to the portal value): arbs-w-portable
+  Input:   the portable zip produced by build-arch.bat (MoonlightPortable-x64-<version>.zip), uploaded as a
+           workflow artifact BEFORE arbs-w-zip-extras.ps1 runs. The extras step writes package-files.sha256
+           (hashes of the zip content) and checks it, so the files must be signed before that list is made.
+  Signs:   only PE files built from ARBS-W (arbs-w) sources: ARBS-W.exe, AntiHooking.dll.
+  Not signed (left unchanged): Qt6*.dll and Qt plugins (Qt), av*/dav1d/libplacebo/opus/SDL3/libcrypto/libssl
+           (moonlight-qt-deps), msvcp140*/vcruntime140* (Microsoft).
+
+  TODO (planning decision, not decided here):
+   (b) SignPath Foundation requires product name = project name in the file metadata; the ProductName of
+       ARBS-W.exe and AntiHooking.dll is UNVERIFIED against that rule (check before applying).
+   ARBS scripts (ARBS-W tools folder, ArbsWKit.ps1) are not included in this draft (<powershell-file> possible later).
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="ARBS-W.exe"><authenticode-sign/></pe-file>
+    <pe-file path="AntiHooking.dll"><authenticode-sign/></pe-file>
+  </zip-file>
+</artifact-configuration>

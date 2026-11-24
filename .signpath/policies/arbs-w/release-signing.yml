@@ -1,0 +1,6 @@
+# DRAFT (CI1, not active). SignPath signing policy "release-signing" for project "arbs-w" (assumed slugs).
+# Only GitHub-hosted runners may request signing. Every release still needs manual approval in SignPath
+# (Foundation terms).
+github-policies:
+  runners:
+    require_github_hosted: true
