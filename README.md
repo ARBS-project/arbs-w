@@ -40,6 +40,7 @@ Status: **experimental**. What has actually been confirmed on real devices is li
 
 GPL-3.0 — see [LICENSE](LICENSE). Third-party and upstream notices: [NOTICE-ARBS.md](NOTICE-ARBS.md).
 Security issues: please use the private reporting described in the `arbs` repository `SECURITY.md`.
+Code signing policy (signed files, roles, third-party components, privacy): see the [`arbs` README](https://github.com/ARBS-project/arbs#code-signing-policy).
 
 ---
 
@@ -50,3 +51,4 @@ Flydigi APEX 6 Pro에서 호스트 게임의 DualSense 출력(일반 진동·트
 빌드에는 ARBS Core(`arbs` 저장소, `ARBS_CORE_DIR` 환경 변수로 위치 지정)가 필요합니다. Discord 연동 제외, 업데이트 확인 기본 꺼짐,
 시작 때 moonlight-stream.org 조회(호환성·게임패드 매핑) 꺼짐. 라이선스 GPL-3.0. 상태: 실험적.
 **Flydigi와 관련 없는 비공식 오픈소스 프로젝트**이며 Moonlight·Sunshine·Apollo·Vibepollo 프로젝트와도 관련이 없습니다.
+코드 서명 정책(서명 대상·역할·제3자 구성요소·개인정보)은 [`arbs` README](https://github.com/ARBS-project/arbs#code-signing-policy)를 보세요.
