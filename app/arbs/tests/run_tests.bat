@@ -19,11 +19,11 @@ set DOTNET_NOLOGO=1
 set DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
 set DOTNET_GENERATE_ASPNET_CERTIFICATE=false
 set DOTNET_ADD_GLOBAL_TOOLS_TO_PATH=false
-set DOTNET_CLI_HOME=D:\AI\toolchain\dotnet-home
-set NUGET_PACKAGES=D:\AI\toolchain\nuget-packages
-set NUGET_HTTP_CACHE_PATH=D:\AI\toolchain\nuget-http-cache
-set NUGET_PLUGINS_CACHE_PATH=D:\AI\toolchain\nuget-plugins-cache
-set NUGET_SCRATCH=D:\AI\toolchain\nuget-scratch
+set DOTNET_CLI_HOME=D:\AI\ARBS-APEX\toolchain\dotnet-home
+set NUGET_PACKAGES=D:\AI\ARBS-APEX\toolchain\nuget-packages
+set NUGET_HTTP_CACHE_PATH=D:\AI\ARBS-APEX\toolchain\nuget-http-cache
+set NUGET_PLUGINS_CACHE_PATH=D:\AI\ARBS-APEX\toolchain\nuget-plugins-cache
+set NUGET_SCRATCH=D:\AI\ARBS-APEX\toolchain\nuget-scratch
 set MSBUILDDISABLENODEREUSE=1
 set CL=
 
